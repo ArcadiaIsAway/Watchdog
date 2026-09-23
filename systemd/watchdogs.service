@@ -1,0 +1,19 @@
+[Unit]
+Description=WatchDogs host monitor (headless logger)
+After=network.target systemd-journald.service
+
+[Service]
+Type=simple
+# Install the package first: pip install /path/to/WatchDogs
+# and copy config.yaml to /etc/watchdogs/config.yaml
+# Local log only:
+# ExecStart=/usr/bin/watchdogs --headless -c /etc/watchdogs/config.yaml
+# Stream status to the dashboard on your computer:
+ExecStart=/usr/bin/watchdogs --headless -c /etc/watchdogs/config.yaml --report YOUR_PC_IP:8765 --token-file /etc/watchdogs/token
+Restart=on-failure
+RestartSec=3
+User=root
+Nice=5
+
+[Install]
+WantedBy=multi-user.target

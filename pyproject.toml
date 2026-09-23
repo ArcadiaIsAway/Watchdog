@@ -1,0 +1,25 @@
+[project]
+name = "watchdogs"
+version = "0.1.0"
+description = "Single-host Linux login and command monitor with a live terminal dashboard"
+requires-python = ">=3.11"
+dependencies = [
+    "textual>=1.0.0",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+watchdogs = "watchdogs.__main__:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["watchdogs*"]
+
+[tool.setuptools.package-data]
+watchdogs = ["*.tcss"]
