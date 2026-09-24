@@ -12,3 +12,4 @@ venv/
 .mypy_cache/
 *.log
 .watchdogs-data/
+pair.env

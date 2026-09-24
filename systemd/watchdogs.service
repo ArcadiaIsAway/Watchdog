@@ -8,8 +8,11 @@ Type=simple
 # and copy config.yaml to /etc/watchdogs/config.yaml
 # Local log only:
 # ExecStart=/usr/bin/watchdogs --headless -c /etc/watchdogs/config.yaml
-# Stream status to the dashboard on your computer:
-ExecStart=/usr/bin/watchdogs --headless -c /etc/watchdogs/config.yaml --report YOUR_PC_IP:8765 --token-file /etc/watchdogs/token
+# Prefer: on your PC run `python -m watchdogs pair` (or `pair --ssh user@this-server`)
+# then paste the printed command, or:
+# pair.env can set WATCHDOGS_TOKEN and WATCHDOGS_REPORT
+EnvironmentFile=-/etc/watchdogs/pair.env
+ExecStart=/usr/bin/watchdogs --headless -c /etc/watchdogs/config.yaml
 Restart=on-failure
 RestartSec=3
 User=root

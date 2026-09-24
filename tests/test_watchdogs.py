@@ -19,7 +19,9 @@ from watchdogs.report import ReportClient, ReportServer
 from watchdogs.procs import is_internal_command, is_user_command
 from watchdogs.shellcmds import parse_typed_log_line, parse_zsh_history_line, should_keep_typed
 from watchdogs.sessions import parse_who_line
+from watchdogs.pair import agent_command, pairing_card, persist_pair
 from watchdogs.store import Store
+from watchdogs.__main__ import _normalize_argv
 
 
 def _store() -> Store:
@@ -471,6 +473,39 @@ class ReportLoopbackTests(unittest.TestCase):
         finally:
             agent.stop()
             receiver.stop()
+
+
+class PairingTests(unittest.TestCase):
+    def test_agent_command_and_card(self) -> None:
+        cmd = agent_command("192.168.1.10:8765", "secret-token")
+        self.assertIn("--report 192.168.1.10:8765", cmd)
+        self.assertIn("--token secret-token", cmd)
+        card = pairing_card("secret-token", 8765)
+        self.assertIn("secret-token", card)
+        self.assertIn("sudo python -m watchdogs", card)
+        tunneled = pairing_card("secret-token", 8765, via_ssh="user@box")
+        self.assertIn("127.0.0.1:8765", tunneled)
+        self.assertIn("user@box", tunneled)
+
+    def test_normalize_pair_listen_agent(self) -> None:
+        import sys
+
+        old = sys.argv
+        try:
+            sys.argv = ["watchdogs", "pair", "--ssh", "me@host"]
+            self.assertEqual(_normalize_argv(None), ["--listen", "--pair", "--ssh", "me@host"])
+            sys.argv = ["watchdogs", "agent", "--report", "127.0.0.1:8765"]
+            self.assertEqual(_normalize_argv(None), ["--headless", "--report", "127.0.0.1:8765"])
+        finally:
+            sys.argv = old
+
+    def test_persist_token(self) -> None:
+        dest = Path(tempfile.mkdtemp(prefix="watchdogs-pair-")) / "config.yaml"
+        cfg = load_config()
+        cfg["_config_path"] = str(dest)
+        persist_pair(cfg, "abc123", "0.0.0.0:8765")
+        loaded = load_config(dest)
+        self.assertEqual(loaded["report"]["token"], "abc123")
 
 
 class SettingsTests(unittest.TestCase):

@@ -1,26 +1,13 @@
-# WatchDogs host monitor — edit thresholds and patterns for this machine.
-
-data_dir: null # auto: /var/lib/watchdogs (root) or ~/.local/share/watchdogs
-
-# Agent on the server connects out to the dashboard on your computer.
-# On your computer:  python -m watchdogs listen --token CHANGE_ME
-# On the server:     sudo python -m watchdogs --headless --report YOUR_PC:8765 --token CHANGE_ME
-report:
-  server: null # host:port of the dashboard
-  bind: 0.0.0.0:8765
-  token: null # or env WATCHDOGS_TOKEN
-  reconnect_sec: 3.0
-
+data_dir: null
 watch:
   auth_logs:
-    - /var/log/auth.log
-    - /var/log/secure
+  - /var/log/auth.log
+  - /var/log/secure
   journal: true
   process_events: true
   session_poll_sec: 2.0
-  interactive_only: true # only terminal/sudo commands, not every desktop/system exec
-  typed_commands: true # record the line you pressed Enter on (history/hook), including typos
-
+  interactive_only: true
+  typed_commands: true
 alerts:
   failed_login_threshold: 5
   failed_login_window_sec: 300
@@ -30,51 +17,54 @@ alerts:
   off_hours:
     start: 0
     end: 6
-
-# Matched against executed command lines (process exec and sudo COMMAND=).
+report:
+  server: null
+  bind: 0.0.0.0:8765
+  token: nxfxFPSEkg2_kIB-dKTSro6n5D_PtW6u
+  reconnect_sec: 3.0
 suspicious_commands:
-  - pattern: "/dev/tcp/"
-    severity: critical
-    reason: bash TCP reverse shell
-  - pattern: '(?:^|[/\s])nc(?:\.traditional)?(?:\s|$).*(?:-e|-c|/bin/(?:ba)?sh)'
-    severity: critical
-    reason: netcat reverse shell
-  - pattern: 'ncat\s+.*--(?:exec|sh-exec)'
-    severity: critical
-    reason: ncat reverse shell
-  - pattern: 'socat\s+.*exec:'
-    severity: critical
-    reason: socat reverse shell
-  - pattern: 'python[0-9.]*\s+-c\s+.*(socket|pty|subprocess)'
-    severity: high
-    reason: inline Python shell
-  - pattern: 'perl\s+-e\s+.*socket'
-    severity: high
-    reason: inline Perl shell
-  - pattern: 'php\s+-r\s+.*(socket|fsockopen)'
-    severity: high
-    reason: inline PHP shell
-  - pattern: '(?:curl|wget)\s+.*\|\s*(?:ba)?sh'
-    severity: critical
-    reason: pipe remote script to shell
-  - pattern: '\bnmap\b'
-    severity: medium
-    reason: network reconnaissance
-  - pattern: '\bmasscan\b'
-    severity: high
-    reason: mass port scan
-  - pattern: '(?:^|[/\s])(?:vim|nvim|nano|vi|emacs|sed|tee)\s+.*/(?:etc/|authorized_keys|sudoers)'
-    severity: high
-    reason: editing sensitive files
-  - pattern: 'chmod\s+(?:-R\s+)?(?:[0-7]*7[0-7]{2}|777)\b'
-    severity: medium
-    reason: world-writable permissions
-  - pattern: 'crontab\s+-'
-    severity: medium
-    reason: crontab modification
-  - pattern: 'systemctl\s+(?:enable|link|edit)\b'
-    severity: medium
-    reason: persistence via systemd
-  - pattern: '(?:useradd|adduser|usermod\s+-aG\s+sudo)\b'
-    severity: high
-    reason: account or sudo-group change
+- pattern: /dev/tcp/
+  severity: critical
+  reason: bash TCP reverse shell
+- pattern: (?:^|[/\s])nc(?:\.traditional)?(?:\s|$).*(?:-e|-c|/bin/(?:ba)?sh)
+  severity: critical
+  reason: netcat reverse shell
+- pattern: ncat\s+.*--(?:exec|sh-exec)
+  severity: critical
+  reason: ncat reverse shell
+- pattern: 'socat\s+.*exec:'
+  severity: critical
+  reason: socat reverse shell
+- pattern: python[0-9.]*\s+-c\s+.*(socket|pty|subprocess)
+  severity: high
+  reason: inline Python shell
+- pattern: perl\s+-e\s+.*socket
+  severity: high
+  reason: inline Perl shell
+- pattern: php\s+-r\s+.*(socket|fsockopen)
+  severity: high
+  reason: inline PHP shell
+- pattern: (?:curl|wget)\s+.*\|\s*(?:ba)?sh
+  severity: critical
+  reason: pipe remote script to shell
+- pattern: \bnmap\b
+  severity: medium
+  reason: network reconnaissance
+- pattern: \bmasscan\b
+  severity: high
+  reason: mass port scan
+- pattern: (?:^|[/\s])(?:vim|nvim|nano|vi|emacs|sed|tee)\s+.*/(?:etc/|authorized_keys|sudoers)
+  severity: high
+  reason: editing sensitive files
+- pattern: chmod\s+(?:-R\s+)?(?:[0-7]*7[0-7]{2}|777)\b
+  severity: medium
+  reason: world-writable permissions
+- pattern: crontab\s+-
+  severity: medium
+  reason: crontab modification
+- pattern: systemctl\s+(?:enable|link|edit)\b
+  severity: medium
+  reason: persistence via systemd
+- pattern: (?:useradd|adduser|usermod\s+-aG\s+sudo)\b
+  severity: high
+  reason: account or sudo-group change

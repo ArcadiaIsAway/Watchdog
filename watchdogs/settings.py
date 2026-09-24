@@ -165,6 +165,7 @@ class SettingsScreen(ModalScreen[str | None]):
             yield Static("", id="settings-status")
             with Horizontal(id="settings-actions"):
                 yield Button("Save & apply", id="save", variant="primary")
+                yield Button("Copy server command", id="copy-agent")
                 yield Button("Cancel", id="cancel")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
@@ -173,6 +174,22 @@ class SettingsScreen(ModalScreen[str | None]):
         elif event.button.id == "gen-token":
             self.query_one("#in-token", Input).value = secrets.token_urlsafe(24)
             self._status("New token generated — save to use it on the other side too")
+        elif event.button.id == "copy-agent":
+            from watchdogs.pair import agent_command, local_addresses
+
+            token = self.query_one("#in-token", Input).value.strip()
+            bind = self.query_one("#in-bind", Input).value.strip() or "0.0.0.0:8765"
+            target = self.query_one("#in-target", Input).value.strip()
+            if not target:
+                host = (local_addresses() or ["YOUR_PC_IP"])[0]
+                port = bind.rsplit(":", 1)[-1]
+                target = f"{host}:{port}"
+            if not token:
+                self._status("Set a shared token first")
+                return
+            cmd = agent_command(target, token)
+            self.app.copy_to_clipboard(cmd)
+            self._status(f"Copied: {cmd}")
         elif event.button.id == "save":
             self.action_save()
 
