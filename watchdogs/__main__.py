@@ -4,13 +4,36 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import signal
 import sys
 import time
+from pathlib import Path
 
 from watchdogs import __version__
 from watchdogs.config import load_config
 from watchdogs.engine import Engine, format_headless, is_root, require_root_or_demo
+
+
+def _use_project_venv() -> None:
+    """Re-run under .venv when system Python is missing the dashboard deps."""
+    try:
+        import textual  # noqa: F401
+        return
+    except ImportError:
+        pass
+    root = Path(__file__).resolve().parent.parent
+    for venv in (root / ".venv", root / "venv"):
+        candidate = venv / "bin" / "python"
+        already_in = Path(sys.prefix).resolve() == venv.resolve()
+        if candidate.is_file() and not already_in:
+            os.execv(str(candidate), [str(candidate), "-m", "watchdogs", *sys.argv[1:]])
+    raise SystemExit(
+        "WatchDogs needs Textual. From this folder run:\n"
+        "  python -m venv .venv\n"
+        "  .venv/bin/pip install -e .\n"
+        "  .venv/bin/python -m watchdogs"
+    )
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -55,6 +78,8 @@ def _setup_logging(headless: bool, log_path) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    if argv is None:
+        _use_project_venv()
     args = _parse_args(argv)
     cfg = load_config(args.config)
     role = str((cfg.get("link") or {}).get("role") or "")
