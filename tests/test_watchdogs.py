@@ -11,13 +11,13 @@ from watchdogs.auth import parse_auth_line, sudo_command_event
 from watchdogs.config import DEFAULTS, apply_form_values, load_config, save_config
 from watchdogs.demo import scripted_events
 from watchdogs.engine import Engine, format_headless
-from watchdogs.models import CommandEvent, LoginEvent
+from watchdogs.models import CommandEvent, HostStatus, LoginEvent
 from watchdogs.rules import RuleEngine
 from watchdogs.protocol import decode_payload, encode_event, parse_endpoint
 from watchdogs.settings import values_from_engine
-from watchdogs.report import ReportClient, ReportServer
+from watchdogs.report import Outbox, ReportClient, ReportServer
 from watchdogs.procs import is_internal_command, is_user_command
-from watchdogs.shellcmds import parse_typed_log_line, parse_zsh_history_line, should_keep_typed
+from watchdogs.shellcmds import _bash_hook, parse_typed_log_line, parse_zsh_history_line, should_keep_typed
 from watchdogs.sessions import parse_who_line
 from watchdogs.discover import describe_endpoints, find_peer, make_join_code, normalize_join_code
 from watchdogs.store import Store
@@ -225,6 +225,11 @@ class SelfFilterTests(unittest.TestCase):
         self.assertEqual(event.cmdline, "gti status")
         self.assertEqual(event.source, "shell")
         self.assertTrue(is_user_command(event, interactive_only=True))
+        hook = _bash_hook(Path("/tmp/typed-commands.log"))
+        self.assertNotIn("awk", hook)
+        self.assertNotIn('\\"', hook)
+        self.assertIn("history 1", hook)
+        self.assertIn("/tmp/typed-commands.log", hook)
 
     def test_keeps_real_user_commands(self) -> None:
         event = CommandEvent(
@@ -403,6 +408,27 @@ class ProtocolTests(unittest.TestCase):
         sessions = decode_payload("sessions", wrapped["payload"])
         assert isinstance(sessions, list)
         self.assertEqual(sessions[0].username, "alice")
+
+    def test_outbox_holds_until_ack(self) -> None:
+        box = Outbox(maxlen=8)
+        login = LoginEvent(
+            ts=datetime(2026, 9, 23, 9, 0, 0),
+            result="accepted",
+            username="alice",
+            source_ip="10.0.0.2",
+            service="sshd",
+        )
+        first = box.push("login", login, "srv1")
+        box.push("status", HostStatus(host="srv1", logins=1), "srv1")
+        box.push("status", HostStatus(host="srv1", logins=2), "srv1")
+        pending = box.snapshot()
+        kinds = [frame["kind"] for frame in pending]
+        self.assertEqual(kinds.count("status"), 1)
+        self.assertIn("login", kinds)
+        box.ack(first or 0)
+        leftover = box.snapshot()
+        self.assertTrue(all(frame["kind"] == "status" for frame in leftover))
+        self.assertEqual(leftover[0]["payload"]["logins"], 2)
 
 
 class ReportLoopbackTests(unittest.TestCase):

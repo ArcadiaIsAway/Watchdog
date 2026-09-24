@@ -104,31 +104,38 @@ def _homes() -> list[tuple[str, Path]]:
     return found
 
 
-def _bash_hook(log_path: Path) -> str:
-    return f"""# {_HOOK_MARK}
-_watchdogs_typed() {{
-  local cmd
-  cmd="$(HISTTIMEFORMAT= builtin history 1 2>/dev/null | awk '{{ sub(/^[[:space:]]*[0-9]+[[:space:]]*/, \\"\\"); print }}')"
+_BASH_HOOK = r"""# watchdogs-typed-commands
+_watchdogs_typed() {
+  local raw cmd
+  raw=$(HISTTIMEFORMAT= builtin history 1 2>/dev/null) || return 0
+  read -r _ cmd <<< "$raw"
   [ -n "$cmd" ] || return 0
-  printf '%s|%s|%s|%s\\n' "$(date -Iseconds 2>/dev/null || date)" "${{USER:-unknown}}" "${{TTY#/dev/}}" "$cmd" >> "{log_path}"
-}}
-case ";${{PROMPT_COMMAND:-}};" in
+  printf '%s|%s|%s|%s\n' "$(date -Iseconds 2>/dev/null || date)" "${USER:-unknown}" "${TTY#/dev/}" "$cmd" >> "__LOG__"
+  builtin history -a 2>/dev/null || true
+}
+case ";${PROMPT_COMMAND:-};" in
   *"_watchdogs_typed"*) ;;
-  *) PROMPT_COMMAND="_watchdogs_typed${{PROMPT_COMMAND:+;$PROMPT_COMMAND}}" ;;
+  *) PROMPT_COMMAND="_watchdogs_typed${PROMPT_COMMAND:+;$PROMPT_COMMAND}" ;;
 esac
 """
 
-
-def _zsh_hook(log_path: Path) -> str:
-    return f"""# {_HOOK_MARK}
-_watchdogs_typed() {{
-  print -r -- "$(date -Iseconds 2>/dev/null || date)|${{USER:-unknown}}|${{TTY#/dev/}}|$1" >> "{log_path}"
-}}
+_ZSH_HOOK = r"""# watchdogs-typed-commands
+_watchdogs_typed() {
+  print -r -- "$(date -Iseconds 2>/dev/null || date)|${USER:-unknown}|${TTY#/dev/}|$1" >> "__LOG__"
+}
 typeset -ga preexec_functions
-if [[ " ${{preexec_functions[*]}} " != *" _watchdogs_typed "* ]]; then
+if [[ " ${preexec_functions[*]} " != *" _watchdogs_typed "* ]]; then
   preexec_functions+=(_watchdogs_typed)
 fi
 """
+
+
+def _bash_hook(log_path: Path) -> str:
+    return _BASH_HOOK.replace("__LOG__", str(log_path))
+
+
+def _zsh_hook(log_path: Path) -> str:
+    return _ZSH_HOOK.replace("__LOG__", str(log_path))
 
 
 def install_hooks(log_path: Path, hook_dir: Path) -> None:

@@ -1,31 +1,39 @@
-"""Agent reporter (connects out) and dashboard listener (accepts reports)."""
+"""Monitored host streams events to the dashboard over a sequenced TCP link."""
 
 from __future__ import annotations
 
 import hashlib
 import hmac
 import logging
-import queue
 import socket
 import threading
+import time
+from collections import deque
 from typing import Callable
 
 from watchdogs import __version__
 from watchdogs.models import HostStatus
 from watchdogs.protocol import (
     PROTOCOL_NAME,
-    decode_payload,
+    STREAM_KINDS,
+    decode_frame,
     dumps,
+    encode_ack,
+    encode_error,
     encode_event,
     encode_hello,
-    encode_status,
+    encode_ok,
+    encode_ping,
+    encode_pong,
     loads,
 )
 
 log = logging.getLogger("watchdogs.report")
 
 OnEvent = Callable[[str, object], None]
-OnLink = Callable[[str, str], None]  # status, hostname
+OnLink = Callable[[str, str], None]
+
+_COALESCE = frozenset({"sessions", "status"})
 
 
 def tokens_match(offered: str, expected: str) -> bool:
@@ -34,28 +42,58 @@ def tokens_match(offered: str, expected: str) -> bool:
     return hmac.compare_digest(left, right)
 
 
-def _iter_lines(sock: socket.socket, stop: threading.Event, timeout: float = 0.5):
-    leftover = b""
-    sock.settimeout(timeout)
-    while not stop.is_set():
-        try:
-            chunk = sock.recv(4096)
-        except TimeoutError:
-            continue
-        except OSError:
-            return
-        if not chunk:
-            return
-        leftover += chunk
-        while b"\n" in leftover:
-            line, leftover = leftover.split(b"\n", 1)
-            yield line
-        if len(leftover) > 1_000_000:
-            return
+class Outbox:
+    """Sequence events on the server; hold them until the dashboard acks."""
+
+    def __init__(self, maxlen: int = 3000) -> None:
+        self.maxlen = maxlen
+        self._lock = threading.Lock()
+        self._seq = 0
+        self._log: deque[dict] = deque()
+        self._latest: dict[str, dict] = {}
+        self._new = threading.Event()
+
+    def push(self, kind: str, payload: object, host: str) -> int | None:
+        frame = encode_event(kind, payload, host)
+        if frame is None:
+            return None
+        with self._lock:
+            self._seq += 1
+            frame["seq"] = self._seq
+            if kind in _COALESCE:
+                self._latest[kind] = frame
+            else:
+                self._log.append(frame)
+                while len(self._log) > self.maxlen:
+                    self._log.popleft()
+            self._new.set()
+            return self._seq
+
+    def wait(self, timeout: float) -> bool:
+        flagged = self._new.wait(timeout)
+        if flagged:
+            self._new.clear()
+        return flagged
+
+    def snapshot(self) -> list[dict]:
+        with self._lock:
+            items = list(self._log) + list(self._latest.values())
+        items.sort(key=lambda frame: int(frame.get("seq") or 0))
+        return items
+
+    def ack(self, seq: int) -> None:
+        seq = int(seq)
+        with self._lock:
+            self._log = deque(frame for frame in self._log if int(frame.get("seq") or 0) > seq)
+            self._latest = {
+                kind: frame
+                for kind, frame in self._latest.items()
+                if int(frame.get("seq") or 0) > seq
+            }
 
 
 class ReportClient:
-    """Connects from the monitored host to the dashboard and streams events."""
+    """Server side of the link: connect out, send sequenced frames, wait for acks."""
 
     def __init__(
         self,
@@ -72,30 +110,21 @@ class ReportClient:
         self.local_host = local_host or socket.gethostname()
         self.counts = counts
         self.reconnect_sec = max(1.0, float(reconnect_sec))
-        self._queue: queue.Queue[dict] = queue.Queue(maxsize=2000)
+        self.outbox = Outbox()
         self._sock: socket.socket | None = None
         self._halt = threading.Event()
+        self._last_pong = 0.0
         self.connected = False
 
     def halt(self) -> None:
         self._halt.set()
+        self.outbox._new.set()
         self.disconnect()
 
     def on_event(self, kind: str, payload: object) -> None:
-        message = encode_event(kind, payload, self.local_host)
-        if message is None:
+        if kind not in STREAM_KINDS:
             return
-        try:
-            self._queue.put_nowait(message)
-        except queue.Full:
-            try:
-                self._queue.get_nowait()
-            except queue.Empty:
-                pass
-            try:
-                self._queue.put_nowait(message)
-            except queue.Full:
-                pass
+        self.outbox.push(kind, payload, self.local_host)
 
     def update_target(
         self,
@@ -140,6 +169,7 @@ class ReportClient:
         log.info("reporting to %s:%s as %s", self.host, self.port, self.local_host)
         sock = socket.create_connection((self.host, self.port), timeout=8)
         self._sock = sock
+        reader = threading.Thread(target=self._recv, args=(sock, stop), name="report-recv", daemon=True)
         try:
             sock.sendall(dumps(encode_hello(self.token, self.local_host, __version__)))
             reply_line = _wait_line(sock, stop, timeout=8)
@@ -150,56 +180,67 @@ class ReportClient:
                 log.error("dashboard rejected hello: %s", reply)
                 return
             self.connected = True
+            self._last_pong = time.monotonic()
             log.info("report link up")
-            import time
-
+            reader.start()
+            sent_seq = 0
             last_status = 0.0
-            while not stop.is_set():
-                try:
-                    message = self._queue.get(timeout=0.4)
-                    sock.sendall(dumps(message))
-                except queue.Empty:
-                    pass
-                except OSError:
-                    return
-                now = time.monotonic()
-                if self.counts and now - last_status >= 5:
+            last_ping = 0.0
+            while not stop.is_set() and not self._halt.is_set() and self._sock is sock:
+                if self.counts and time.monotonic() - last_status >= 5:
                     status = self.counts()
                     status.host = self.local_host
-                    sock.sendall(dumps(encode_status(status)))
-                    last_status = now
+                    self.outbox.push("status", status, self.local_host)
+                    last_status = time.monotonic()
+                for frame in self.outbox.snapshot():
+                    seq = int(frame.get("seq") or 0)
+                    if seq <= sent_seq:
+                        continue
+                    sock.sendall(dumps(frame))
+                    sent_seq = seq
+                now = time.monotonic()
+                if now - last_ping >= 4:
+                    sock.sendall(dumps(encode_ping()))
+                    last_ping = now
+                if now - self._last_pong > 15:
+                    log.warning("dashboard heartbeat lost")
+                    return
+                self.outbox.wait(0.4)
+        except OSError:
+            return
         finally:
             self.connected = False
-            try:
-                sock.close()
-            except OSError:
-                pass
+            if self._sock is sock:
+                self.disconnect()
+            if reader.is_alive():
+                reader.join(timeout=1.0)
 
-
-def _wait_line(sock: socket.socket, stop: threading.Event, timeout: float) -> bytes | None:
-    sock.settimeout(0.5)
-    leftover = b""
-    import time
-
-    deadline = time.monotonic() + timeout
-    while not stop.is_set() and time.monotonic() < deadline:
-        if b"\n" in leftover:
-            line, leftover = leftover.split(b"\n", 1)
-            return line
+    def _recv(self, sock: socket.socket, stop: threading.Event) -> None:
         try:
-            chunk = sock.recv(4096)
-        except TimeoutError:
-            continue
+            for line in _iter_lines(sock, stop):
+                try:
+                    message = loads(line)
+                except (ValueError, UnicodeDecodeError):
+                    continue
+                mtype = message.get("type")
+                if mtype == "ack":
+                    self.outbox.ack(int(message.get("seq") or 0))
+                elif mtype == "pong":
+                    self._last_pong = time.monotonic()
+                elif mtype == "error":
+                    log.error("dashboard error: %s", message)
+                    if self._sock is sock:
+                        self.disconnect()
+                    return
         except OSError:
-            return None
-        if not chunk:
-            return None
-        leftover += chunk
-    return None
+            return
+        finally:
+            if self._sock is sock:
+                self.disconnect()
 
 
 class ReportServer:
-    """Accepts outbound agent connections and feeds events into the dashboard."""
+    """Dashboard side: accept one host stream and feed the monitor."""
 
     def __init__(
         self,
@@ -231,7 +272,6 @@ class ReportServer:
             pass
 
     def prepare(self) -> tuple[str, int]:
-        """Bind now (main thread) so a busy port is a clear error, not a thread crash."""
         last: OSError | None = None
         hosts = [self.bind_host]
         if self.bind_host not in {"0.0.0.0", "127.0.0.1"}:
@@ -301,31 +341,40 @@ class ReportServer:
             if hello.get("type") == "probe" and hello.get("protocol") == PROTOCOL_NAME:
                 offered = str(hello.get("token") or "")
                 if tokens_match(offered, self.token):
-                    conn.sendall(dumps({"type": "ok", "kind": "probe"}))
+                    conn.sendall(dumps(encode_ok(kind="probe")))
                 else:
-                    conn.sendall(dumps({"type": "error", "reason": "bad token"}))
+                    conn.sendall(dumps(encode_error("bad token")))
                 return
             if hello.get("type") != "hello" or hello.get("protocol") != PROTOCOL_NAME:
-                conn.sendall(dumps({"type": "error", "reason": "bad handshake"}))
+                conn.sendall(dumps(encode_error("bad handshake")))
                 return
             offered = str(hello.get("token") or "")
             if not tokens_match(offered, self.token):
-                conn.sendall(dumps({"type": "error", "reason": "bad token"}))
+                conn.sendall(dumps(encode_error("bad token")))
                 log.warning("rejected agent from %s (bad token)", addr)
                 return
             host = str(hello.get("host") or addr[0])
-            conn.sendall(dumps({"type": "ok"}))
+            conn.sendall(dumps(encode_ok()))
             with self._lock:
                 self._clients += 1
             if self.on_link:
                 self.on_link("up", host)
             log.info("agent connected host=%s from=%s", host, addr)
+            last_ack = 0
             for line in _iter_lines(conn, stop):
                 message = loads(line)
-                kind, payload = _message_to_event(message)
+                mtype = message.get("type")
+                if mtype == "ping":
+                    conn.sendall(dumps(encode_pong()))
+                    continue
+                kind, payload = decode_frame(message)
                 if kind is None:
                     continue
                 self.on_event(kind, payload)
+                seq = int(message.get("seq") or 0)
+                if seq and seq != last_ack:
+                    conn.sendall(dumps(encode_ack(seq)))
+                    last_ack = seq
         except Exception:
             log.exception("agent session from %s failed", addr)
         finally:
@@ -340,30 +389,41 @@ class ReportServer:
                 pass
 
 
-def _message_to_event(message: dict) -> tuple[str | None, object | None]:
-    mtype = message.get("type")
-    if mtype == "status":
-        payload = message.get("payload") or message
-        host = str(message.get("host") or payload.get("host") or "")
-        if isinstance(payload, dict):
-            payload = {**payload, "host": host or payload.get("host")}
-            decoded = decode_payload("status", payload)
-            return "status", decoded
-        return None, None
-    if mtype != "event":
-        return None, None
-    kind = str(message.get("kind") or "")
-    raw = message.get("payload")
-    if not isinstance(raw, dict) and kind != "sessions":
-        if kind == "sessions" and isinstance(raw, list):
-            raw = {"sessions": raw}
-        else:
-            return None, None
-    if kind == "sessions" and isinstance(raw, list):
-        raw = {"sessions": raw}
-    if not isinstance(raw, dict):
-        return None, None
-    decoded = decode_payload(kind, raw)
-    if decoded is None:
-        return None, None
-    return kind, decoded
+def _iter_lines(sock: socket.socket, stop: threading.Event, timeout: float = 0.5):
+    leftover = b""
+    sock.settimeout(timeout)
+    while not stop.is_set():
+        try:
+            chunk = sock.recv(4096)
+        except TimeoutError:
+            continue
+        except OSError:
+            return
+        if not chunk:
+            return
+        leftover += chunk
+        while b"\n" in leftover:
+            line, leftover = leftover.split(b"\n", 1)
+            yield line
+        if len(leftover) > 1_000_000:
+            return
+
+
+def _wait_line(sock: socket.socket, stop: threading.Event, timeout: float) -> bytes | None:
+    sock.settimeout(0.5)
+    leftover = b""
+    deadline = time.monotonic() + timeout
+    while not stop.is_set() and time.monotonic() < deadline:
+        if b"\n" in leftover:
+            line, leftover = leftover.split(b"\n", 1)
+            return line
+        try:
+            chunk = sock.recv(4096)
+        except TimeoutError:
+            continue
+        except OSError:
+            return None
+        if not chunk:
+            return None
+        leftover += chunk
+    return None

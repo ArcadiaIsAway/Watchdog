@@ -201,13 +201,13 @@ def tcp_reachable(host: str, port: int, timeout: float = 0.8) -> bool:
 
 def token_accepted(host: str, port: int, code: str, timeout: float = 1.2) -> bool:
     """Ask a dashboard if this join code is right, without staying connected."""
-    from watchdogs.protocol import PROTOCOL_NAME, dumps, loads
+    from watchdogs.protocol import dumps, encode_probe, loads
 
     sock = None
     try:
         sock = socket.create_connection((host, int(port)), timeout=timeout)
         sock.settimeout(timeout)
-        sock.sendall(dumps({"type": "probe", "protocol": PROTOCOL_NAME, "token": code}))
+        sock.sendall(dumps(encode_probe(code)))
         buf = b""
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline and b"\n" not in buf:
