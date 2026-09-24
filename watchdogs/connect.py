@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import socket
 import threading
 
 from textual.app import ComposeResult
@@ -52,14 +53,17 @@ class ConnectScreen(ModalScreen[str | None]):
                 yield Button("2   This is the server  —  send logins and commands", id="as-server", variant="success")
                 yield Button("Just monitor this machine", id="as-local")
             with Vertical(id="view-dashboard"):
-                yield Static("", id="dash-steps")
+                yield Label("ON THE SERVER — look for this", id="dash-server-label")
+                yield Static("", id="dash-identity")
                 yield Static("", id="connect-code")
+                yield Static("", id="dash-steps")
                 yield Static("", id="dash-addrs")
                 yield Static("", id="dash-wait")
                 with Horizontal(id="connect-after"):
                     yield Button("Copy code", id="copy-code")
                     yield Button("Copy best address", id="copy-addr")
                     yield Button("Show monitor", id="to-monitor", variant="primary")
+                    yield Button("I am the server", id="switch-server")
             with Vertical(id="view-server"):
                 yield Static("", id="server-steps")
                 yield Label("Nearby dashboards  —  click one to join")
@@ -110,6 +114,8 @@ class ConnectScreen(ModalScreen[str | None]):
                 self._status(f"Copied {text}")
         elif event.button.id == "to-monitor":
             self.dismiss(f"Dashboard open — join code {self.engine.join_code}")
+        elif event.button.id == "switch-server":
+            self._become_server()
         elif event.button.id == "as-agent":
             self._join()
 
@@ -167,7 +173,7 @@ class ConnectScreen(ModalScreen[str | None]):
             )
             self._status("Searching this network and Tailscale…")
         elif view == "dashboard":
-            self.query_one("#connect-title", Label).update("THIS IS YOUR COMPUTER")
+            self.query_one("#connect-title", Label).update("DASHBOARD  ·  this computer")
 
     def _open_dashboard(self) -> None:
         try:
@@ -184,19 +190,22 @@ class ConnectScreen(ModalScreen[str | None]):
         self._show("dashboard")
         code = self.engine.join_code
         pretty = "   ".join(code) if code else ""
+        name = socket.gethostname()
         port = int((self.engine.cfg.get("link") or {}).get("port") or 8765)
         if self.engine.report_server and self.engine.report_server.actual_port:
             port = self.engine.report_server.actual_port
         addrs = "\n".join(describe_endpoints(port))
+        self.query_one("#dash-identity", Static).update(
+            f"Name   {name}\n"
+            f"Code   {code}\n"
+            f"The server list should show:  {name}   {code}"
+        )
         self.query_one("#connect-code", Static).update(pretty)
         self.query_one("#dash-steps", Static).update(
-            "Leave this screen open.\n"
-            "On the SERVER run:\n"
-            "  sudo .venv/bin/python -m watchdogs\n"
-            "Then tap  This is the server  and click this computer when it appears.\n"
-            "Same Wi-Fi/LAN: the list should find this computer.\n"
-            "Different networks: install Tailscale on BOTH machines, same account, "
-            "then type the 100.x address below."
+            "1. On the other machine:  sudo .venv/bin/python -m watchdogs\n"
+            "2. Tap the green button:  This is the server\n"
+            "3. Click this name/code in Nearby. Same LAN usually finds it.\n"
+            "   Different networks: Tailscale on both, then type a 100.x address."
         )
         self.query_one("#dash-addrs", Static).update(addrs)
         self.query_one("#dash-wait", Static).update(
@@ -219,6 +228,15 @@ class ConnectScreen(ModalScreen[str | None]):
             self._status(f"Connected  ·  {self.engine.remote_host or 'server'}")
         else:
             self.query_one("#dash-wait", Static).update("Waiting for the server to join…")
+
+    def _become_server(self) -> None:
+        try:
+            self.engine.stay_local()
+        except Exception as exc:
+            self._status(str(exc))
+            return
+        self._show("server")
+        self._start_scan()
 
     def _start_scan(self) -> None:
         self._scan_stop.set()

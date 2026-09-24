@@ -82,9 +82,36 @@ def local_addresses() -> list[str]:
                 found.append(ip)
     except OSError:
         pass
-    unique = [ip for ip in _uniq(found) if not ip.startswith("127.")]
-    unique.sort(key=lambda ip: (not ip.startswith("100."), ip))
+    unique = [ip for ip in _uniq(found) if _publicish(ip)]
+    unique.sort(key=lambda ip: (_address_rank(ip), ip))
     return unique
+
+
+def _publicish(ip: str) -> bool:
+    if not ip or ip.startswith("127."):
+        return False
+    # Docker/libvirt default bridges — not useful for joining
+    if ip.startswith(("172.17.", "172.18.", "172.19.")):
+        return False
+    return True
+
+
+def _address_rank(ip: str) -> tuple:
+    if ip.startswith("100."):
+        return (0,)
+    if ip.startswith("192.168."):
+        return (1,)
+    if ip.startswith("10."):
+        return (2,)
+    return (3,)
+
+
+def address_kind(ip: str) -> str:
+    if ip.startswith("100."):
+        return "Tailscale"
+    if ip.startswith(("172.17.", "172.18.", "172.19.")):
+        return "Docker"
+    return "LAN"
 
 
 def broadcast_targets() -> list[str]:
@@ -95,8 +122,8 @@ def broadcast_targets() -> list[str]:
 def describe_endpoints(port: int) -> list[str]:
     lines: list[str] = []
     for ip in local_addresses():
-        kind = "Tailscale" if ip.startswith("100.") else "LAN"
-        mark = "  ← only works if the server is on Tailscale too" if kind == "Tailscale" else ""
+        kind = address_kind(ip)
+        mark = "  ← server needs Tailscale too" if kind == "Tailscale" else ""
         lines.append(f"{kind:<10}  {ip}:{port}{mark}")
     if not lines:
         lines.append(f"unknown    0.0.0.0:{port}")

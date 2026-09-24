@@ -124,11 +124,23 @@ ConnectScreen {
     height: auto;
 }
 
+#dash-server-label {
+    color: #00e5ff;
+    text-style: bold;
+    margin: 0 0 1 0;
+}
+
+#dash-identity {
+    color: #c8d0d8;
+    margin: 0 0 1 0;
+    height: auto;
+}
+
 #connect-code {
     color: #00e5ff;
     text-style: bold;
     text-align: center;
-    margin: 1 0;
+    margin: 0 0 1 0;
     height: auto;
 }
 
