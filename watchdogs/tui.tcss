@@ -98,6 +98,59 @@ SettingsScreen {
     background: rgba(4, 8, 12, 0.72);
 }
 
+ConnectScreen {
+    align: center middle;
+    background: rgba(4, 8, 12, 0.72);
+}
+
+#connect-box {
+    width: 78;
+    max-width: 100%;
+    height: auto;
+    background: #071018;
+    border: solid #00e5ff;
+    padding: 1 2;
+}
+
+#connect-title {
+    color: #00e5ff;
+    text-style: bold;
+}
+
+#connect-lead {
+    color: #7aa8b3;
+    margin: 1 0;
+}
+
+#connect-code {
+    color: #00e5ff;
+    text-style: bold;
+    text-align: center;
+    margin: 0 0 1 0;
+    height: auto;
+}
+
+#connect-addrs {
+    color: #c8d0d8;
+    margin-bottom: 1;
+}
+
+#connect-status {
+    color: #ffb000;
+    height: 2;
+    margin-top: 1;
+}
+
+#connect-actions, #connect-after {
+    height: 3;
+    align: left middle;
+    margin-top: 1;
+}
+
+#connect-actions Button, #connect-after Button {
+    margin-right: 1;
+}
+
 #settings-box {
     width: 92;
     max-width: 100%;

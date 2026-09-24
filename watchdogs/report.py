@@ -74,7 +74,12 @@ class ReportClient:
         self.reconnect_sec = max(1.0, float(reconnect_sec))
         self._queue: queue.Queue[dict] = queue.Queue(maxsize=2000)
         self._sock: socket.socket | None = None
+        self._halt = threading.Event()
         self.connected = False
+
+    def halt(self) -> None:
+        self._halt.set()
+        self.disconnect()
 
     def on_event(self, kind: str, payload: object) -> None:
         message = encode_event(kind, payload, self.local_host)
@@ -121,13 +126,13 @@ class ReportClient:
             pass
 
     def run(self, stop: threading.Event) -> None:
-        while not stop.is_set():
+        while not stop.is_set() and not self._halt.is_set():
             try:
                 self._session(stop)
             except Exception:
                 log.exception("report client session failed")
             self.connected = False
-            if not stop.is_set():
+            if not stop.is_set() and not self._halt.is_set():
                 log.info("reconnect to %s:%s in %.1fs", self.host, self.port, self.reconnect_sec)
                 stop.wait(self.reconnect_sec)
 
@@ -213,14 +218,55 @@ class ReportServer:
         self.ready = threading.Event()
         self._clients = 0
         self._lock = threading.Lock()
+        self._sock: socket.socket | None = None
+
+    def close(self) -> None:
+        sock = self._sock
+        self._sock = None
+        if sock is None:
+            return
+        try:
+            sock.close()
+        except OSError:
+            pass
+
+    def prepare(self) -> tuple[str, int]:
+        """Bind now (main thread) so a busy port is a clear error, not a thread crash."""
+        last: OSError | None = None
+        hosts = [self.bind_host]
+        if self.bind_host not in {"0.0.0.0", "127.0.0.1"}:
+            hosts.append("0.0.0.0")
+        for host in hosts:
+            for port in range(self.port, self.port + 8):
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                try:
+                    sock.bind((host, port))
+                    sock.listen(8)
+                    sock.settimeout(0.5)
+                    self._sock = sock
+                    self.bind_host = host
+                    self.actual_port = int(sock.getsockname()[1])
+                    return host, self.actual_port
+                except OSError as exc:
+                    last = exc
+                    sock.close()
+        hint = ""
+        if last is not None and getattr(last, "errno", None) == 98:
+            hint = (
+                "\nPort is already in use. On this machine run:\n"
+                "  ss -lntp | grep 8765\n"
+                "  pkill -f 'python -m watchdogs'\n"
+                "Then open the dashboard again from the Connect screen."
+            )
+        raise OSError(f"cannot listen on {self.bind_host}:{self.port}: {last}{hint}") from last
 
     def run(self, stop: threading.Event) -> None:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        sock.bind((self.bind_host, self.port))
-        self.actual_port = int(sock.getsockname()[1])
-        sock.listen(8)
-        sock.settimeout(0.5)
+        sock = self._sock
+        if sock is None:
+            self.prepare()
+            sock = self._sock
+        assert sock is not None
         self.ready.set()
         log.info("listening for agents on %s:%s", self.bind_host, self.actual_port)
         workers: list[threading.Thread] = []

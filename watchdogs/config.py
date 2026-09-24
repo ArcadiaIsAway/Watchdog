@@ -33,6 +33,13 @@ DEFAULTS: dict[str, Any] = {
         "token": None,
         "reconnect_sec": 3.0,
     },
+    "link": {
+        "role": None,
+        "join_code": None,
+        "host": None,
+        "port": 8765,
+        "discover_port": 8766,
+    },
     "suspicious_commands": [
         {"pattern": "/dev/tcp/", "severity": "critical", "reason": "bash TCP reverse shell"},
         {
@@ -142,13 +149,8 @@ def save_config(cfg: dict[str, Any], path: str | Path | None = None) -> Path:
 
 def apply_form_values(cfg: dict[str, Any], values: dict[str, Any]) -> dict[str, Any]:
     """Write dashboard form values into the live config mapping."""
-    report = cfg.setdefault("report", {})
     alerts = cfg.setdefault("alerts", {})
     off = alerts.setdefault("off_hours", {})
-    report["server"] = values.get("server") or None
-    report["bind"] = values.get("bind") or "0.0.0.0:8765"
-    report["token"] = values.get("token") or None
-    report["reconnect_sec"] = float(values.get("reconnect_sec") or 3)
     alerts["failed_login_threshold"] = int(values["failed_login_threshold"])
     alerts["failed_login_window_sec"] = int(values["failed_login_window_sec"])
     alerts["always_alert_root_login"] = bool(values.get("always_alert_root_login"))

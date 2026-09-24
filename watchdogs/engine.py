@@ -41,10 +41,14 @@ class Engine:
         self.command_count = 0
         self.alert_count = 0
         self.remote_host = ""
-        self.link_status = "waiting" if receiver else "local"
-        self.report_token = str((cfg.get("report") or {}).get("token") or "")
+        link = cfg.get("link") or {}
+        self.link_role = str(link.get("role") or ("dashboard" if receiver else ""))
+        self.join_code = str(link.get("join_code") or "")
+        self.link_status = "waiting" if receiver or self.link_role == "dashboard" else "local"
+        self.report_token = self.join_code or str((cfg.get("report") or {}).get("token") or "")
         self.report_client: Any = None
         self.report_server: Any = None
+        self.beacon: Any = None
         self._started = False
 
     def add_listener(self, listener: Listener) -> None:
@@ -66,6 +70,11 @@ class Engine:
         elif isinstance(service, ReportServer):
             self.report_server = service
             self.report_token = service.token
+        else:
+            from watchdogs.discover import Beacon
+
+            if isinstance(service, Beacon):
+                self.beacon = service
         if self._started:
             self._spawn(service)
 
@@ -87,42 +96,128 @@ class Engine:
 
     def apply_settings(self, values: dict[str, Any]) -> str:
         from watchdogs.config import apply_form_values, save_config
-        from watchdogs.protocol import parse_endpoint
-        from watchdogs.report import ReportClient
 
         apply_form_values(self.cfg, values)
         self.rules.reload(self.cfg)
-        notes: list[str] = []
-        token = str(values.get("token") or "")
-        self.report_token = token
-        if self.report_server is not None:
-            if token:
-                self.report_server.token = token
-                notes.append("listener token updated")
-            notes.append("bind address is used the next time you start listen")
-        target = str(values.get("server") or "").strip()
-        if target and token and not self.receiver:
-            host, port = parse_endpoint(target)
-            retry = float(values.get("reconnect_sec") or 3)
-            if self.report_client is not None:
-                self.report_client.update_target(host, port, token, retry)
-                notes.append(f"reporting to {host}:{port}")
-            else:
-                client = ReportClient(
-                    host,
-                    port,
-                    token,
-                    counts=self.host_status,
-                    reconnect_sec=retry,
-                )
-                self.add_listener(client.on_event)
-                self.attach(client)
-                notes.append(f"started reporting to {host}:{port}")
-        elif target and not token:
-            notes.append("set a shared token to start reporting")
         path = save_config(self.cfg)
-        notes.insert(0, f"saved {path}")
-        return " — ".join(notes)
+        return f"saved {path}"
+
+    def stay_local(self) -> str:
+        from watchdogs.config import save_config
+
+        self._stop_link()
+        self.link_role = "local"
+        self.join_code = ""
+        self.receiver = False
+        self.link_status = "local"
+        link = self.cfg.setdefault("link", {})
+        link["role"] = "local"
+        link["join_code"] = None
+        link["host"] = None
+        path = save_config(self.cfg)
+        return f"local monitor — {path}"
+
+    def start_dashboard(self, join_code: str = "") -> str:
+        from watchdogs.config import save_config
+        from watchdogs.discover import Beacon, make_join_code, normalize_join_code
+        from watchdogs.report import ReportServer
+
+        self._stop_link()
+        code = normalize_join_code(join_code) or self.join_code or make_join_code()
+        self.join_code = code
+        self.link_role = "dashboard"
+        self.receiver = True
+        self.report_token = code
+        self.remote_host = ""
+        self.link_status = "waiting"
+        link = self.cfg.setdefault("link", {})
+        tcp_port = int(link.get("port") or 8765)
+        udp_port = int(link.get("discover_port") or 8766)
+        server = ReportServer("0.0.0.0", tcp_port, code, self.submit, self.set_link)
+        host, port = server.prepare()
+        beacon = Beacon(code, port, udp_port=udp_port)
+        self.attach(server)
+        self.attach(beacon)
+        link["role"] = "dashboard"
+        link["join_code"] = code
+        link["host"] = None
+        self.cfg.setdefault("report", {})["token"] = code
+        save_config(self.cfg)
+        log.info("dashboard listening on %s:%s code=%s", host, port, code)
+        return f"Dashboard open. Join code {code}"
+
+    def join_dashboard(self, join_code: str, host: str = "") -> str:
+        from watchdogs.config import save_config
+        from watchdogs.discover import find_peer, normalize_join_code
+        from watchdogs.protocol import parse_endpoint
+        from watchdogs.report import ReportClient
+
+        code = normalize_join_code(join_code)
+        if not code:
+            raise ValueError("Type the join code shown on the other machine")
+        target = (host or "").strip()
+        if target:
+            if ":" in target:
+                peer_host, peer_port = parse_endpoint(target)
+            else:
+                peer_host, peer_port = target, int((self.cfg.get("link") or {}).get("port") or 8765)
+        else:
+            udp_port = int((self.cfg.get("link") or {}).get("discover_port") or 8766)
+            peer = find_peer(code, timeout=5.0, udp_port=udp_port)
+            if peer is None:
+                raise ValueError(
+                    "No dashboard with that code on this network. "
+                    "Open the dashboard on the other machine first, or type its address."
+                )
+            peer_host, peer_port = peer.host, peer.port
+        self._stop_link()
+        self.join_code = code
+        self.link_role = "agent"
+        self.receiver = False
+        self.report_token = code
+        self.link_status = "connecting"
+        retry = float((self.cfg.get("report") or {}).get("reconnect_sec") or 3)
+        client = ReportClient(
+            peer_host,
+            peer_port,
+            code,
+            counts=self.host_status,
+            reconnect_sec=retry,
+        )
+        self.add_listener(client.on_event)
+        self.attach(client)
+        link = self.cfg.setdefault("link", {})
+        link["role"] = "agent"
+        link["join_code"] = code
+        link["host"] = f"{peer_host}:{peer_port}"
+        self.cfg.setdefault("report", {})["token"] = code
+        self.cfg["report"]["server"] = f"{peer_host}:{peer_port}"
+        save_config(self.cfg)
+        return f"Joining {peer_host}:{peer_port}  ·  code {code}"
+
+    def restore_link(self) -> str | None:
+        link = self.cfg.get("link") or {}
+        role = str(link.get("role") or "")
+        code = str(link.get("join_code") or "")
+        if role == "dashboard":
+            return self.start_dashboard(code)
+        if role == "agent":
+            return self.join_dashboard(code, str(link.get("host") or ""))
+        return None
+
+    def _stop_link(self) -> None:
+        if self.report_client is not None:
+            self.report_client.halt()
+        if self.report_server is not None:
+            self.report_server.close()
+        if self.beacon is not None:
+            self.beacon.close()
+        self.report_client = None
+        self.report_server = None
+        self.beacon = None
+        self.receiver = False
+        if self.link_status not in {"local"}:
+            self.set_link("local")
 
     def start(self) -> None:
         self._stop.clear()
@@ -154,6 +249,12 @@ class Engine:
     def stop(self) -> None:
         self._stop.set()
         self._inbound.put(None)
+        if self.report_client is not None:
+            self.report_client.halt()
+        if self.report_server is not None:
+            self.report_server.close()
+        if self.beacon is not None:
+            self.beacon.close()
         for thread in self._threads:
             thread.join(timeout=2.5)
         self._threads.clear()
@@ -238,16 +339,19 @@ class Engine:
                 log.exception("listener failed kind=%s", kind)
 
 
+def is_root() -> bool:
+    return hasattr(os, "geteuid") and os.geteuid() == 0
+
+
 def require_root_or_demo(demo: bool, listen: bool = False) -> None:
     if demo or listen:
         return
-    if hasattr(os, "geteuid") and os.geteuid() == 0:
+    if is_root():
         return
     raise SystemExit(
         "WatchDogs needs root to read auth logs and process exec events.\n"
         "Run: sudo python -m watchdogs\n"
-        "Or:  python -m watchdogs --demo\n"
-        "Or:  python -m watchdogs listen   (dashboard on this computer)"
+        "Or:  python -m watchdogs --demo"
     )
 
 

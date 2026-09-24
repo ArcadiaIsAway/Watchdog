@@ -46,6 +46,7 @@ class WatchDogsApp(App[None]):
     BINDINGS = [
         Binding("q", "quit", "Quit"),
         Binding("s", "open_settings", "Settings"),
+        Binding("j", "open_connect", "Connect"),
         Binding("a", "focus_alerts", "Alerts"),
         Binding("c", "focus_commands", "Commands"),
         Binding("p", "toggle_follow", "Pause"),
@@ -54,9 +55,10 @@ class WatchDogsApp(App[None]):
         Binding("space", "ack_alert", "Ack"),
     ]
 
-    def __init__(self, engine: Engine) -> None:
+    def __init__(self, engine: Engine, *, prompt_connect: bool | None = None) -> None:
         super().__init__()
         self.engine = engine
+        self._prompt_connect = prompt_connect
         self._sessions: list[Session] = []
         self._follow_commands = True
         self._held_commands: list[CommandEvent] = []
@@ -83,8 +85,10 @@ class WatchDogsApp(App[None]):
     def on_mount(self) -> None:
         self.engine.add_listener(self._on_engine_event)
         self.set_interval(1.0, self._tick_clock)
-        if self.engine.receiver:
-            mode = "LISTEN"
+        if self.engine.receiver or self.engine.link_role == "dashboard":
+            mode = "DASHBOARD"
+        elif self.engine.link_role == "agent":
+            mode = "SERVER"
         elif self.engine.demo:
             mode = "DEMO"
         else:
@@ -93,6 +97,11 @@ class WatchDogsApp(App[None]):
         table = self.query_one("#commands", DataTable)
         table.add_columns("Time", "User", "Tty", "Pid", "Command")
         self._refresh_command_title()
+        should_prompt = self._prompt_connect
+        if should_prompt is None:
+            should_prompt = self.engine.link_role not in {"dashboard", "agent", "local"}
+        if should_prompt:
+            self.call_after_refresh(self.action_open_connect)
 
     def _on_engine_event(self, kind: str, payload: object) -> None:
         self.call_from_thread(self._apply, kind, payload)
@@ -132,8 +141,10 @@ class WatchDogsApp(App[None]):
         self.query_one("#header-bar", Static).update(self._header_text())
 
     def _header_text(self) -> str:
-        if self.engine.receiver:
-            mode = "LISTEN"
+        if self.engine.receiver or self.engine.link_role == "dashboard":
+            mode = "DASHBOARD"
+        elif self.engine.link_role == "agent":
+            mode = "SERVER"
         elif self.engine.demo:
             mode = "DEMO"
         else:
@@ -146,14 +157,18 @@ class WatchDogsApp(App[None]):
         except AttributeError:
             pass
         now = datetime.now().strftime("%H:%M:%S")
-        if self.engine.receiver:
+        if self.engine.link_role == "dashboard" or self.engine.receiver:
             link = self.engine.link_status.upper()
-            remote = self.engine.remote_host or "waiting for agent"
-            identity = f"remote={remote}     LINK {link}"
-            note = "Receiving logins, commands, and alerts  ·  press s to set token, bind, and thresholds"
+            remote = self.engine.remote_host or "waiting"
+            code = self.engine.join_code or "----"
+            identity = f"JOIN {code}     remote={remote}     LINK {link}"
+            note = "Other machine: same app → Join dashboard → type this code  ·  press j to reconnect"
+        elif self.engine.link_role == "agent":
+            identity = f"{_host()}     {priv}     JOIN {self.engine.join_code or '----'}"
+            note = "Sending logins and commands to the dashboard  ·  press j to change connection"
         else:
             identity = f"{_host()}     {priv}"
-            note = "Captures logins and executed commands  ·  press s to set report target and alerts"
+            note = "Captures logins and executed commands  ·  press j to connect both machines"
         return (
             f"WATCH·DOGS  // HOST MONITOR     {mode}     {identity}     {now}\n"
             f"SESSIONS {len(self._sessions)}    "
@@ -170,11 +185,28 @@ class WatchDogsApp(App[None]):
         from watchdogs.settings import SettingsScreen
 
         def _done(message: str | None) -> None:
+            if message == "__connect__":
+                self.action_open_connect()
+                return
             if message:
                 self.notify(message, title="Settings", timeout=8)
                 self._refresh_header()
 
         self.push_screen(SettingsScreen(self.engine), _done)
+
+    def action_open_connect(self) -> None:
+        from watchdogs.connect import ConnectScreen
+
+        def _done(message: str | None) -> None:
+            if message:
+                self.notify(message, title="Connect", timeout=8)
+            self._refresh_header()
+            if self.engine.link_role == "dashboard":
+                self.sub_title = f"DASHBOARD  {_host()}"
+            elif self.engine.link_role == "agent":
+                self.sub_title = f"SERVER  {_host()}"
+
+        self.push_screen(ConnectScreen(self.engine), _done)
 
     def _append_command(self, event: CommandEvent) -> None:
         table = self.query_one("#commands", DataTable)

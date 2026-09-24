@@ -19,9 +19,8 @@ from watchdogs.report import ReportClient, ReportServer
 from watchdogs.procs import is_internal_command, is_user_command
 from watchdogs.shellcmds import parse_typed_log_line, parse_zsh_history_line, should_keep_typed
 from watchdogs.sessions import parse_who_line
-from watchdogs.pair import agent_command, pairing_card, persist_pair
+from watchdogs.discover import find_peer, make_join_code, normalize_join_code
 from watchdogs.store import Store
-from watchdogs.__main__ import _normalize_argv
 
 
 def _store() -> Store:
@@ -475,37 +474,77 @@ class ReportLoopbackTests(unittest.TestCase):
             receiver.stop()
 
 
-class PairingTests(unittest.TestCase):
-    def test_agent_command_and_card(self) -> None:
-        cmd = agent_command("192.168.1.10:8765", "secret-token")
-        self.assertIn("--report 192.168.1.10:8765", cmd)
-        self.assertIn("--token secret-token", cmd)
-        card = pairing_card("secret-token", 8765)
-        self.assertIn("secret-token", card)
-        self.assertIn("sudo python -m watchdogs", card)
-        tunneled = pairing_card("secret-token", 8765, via_ssh="user@box")
-        self.assertIn("127.0.0.1:8765", tunneled)
-        self.assertIn("user@box", tunneled)
+class LinkTests(unittest.TestCase):
+    def test_join_code_normalize(self) -> None:
+        self.assertEqual(normalize_join_code("k7m2"), "K7M2")
+        self.assertEqual(normalize_join_code("K-7 m2"), "K7M2")
+        self.assertEqual(len(make_join_code()), 4)
+        self.assertTrue(all(ch in "ABCDEFGHJKLMNPQRSTUVWXYZ23456789" for ch in make_join_code()))
 
-    def test_normalize_pair_listen_agent(self) -> None:
-        import sys
+    def test_beacon_find_peer(self) -> None:
+        import socket
+        import threading
+        import time
 
-        old = sys.argv
+        from watchdogs.discover import Beacon
+
+        scratch = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        scratch.bind(("127.0.0.1", 0))
+        udp_port = scratch.getsockname()[1]
+        scratch.close()
+        stop = threading.Event()
+        beacon = Beacon("K7M2", tcp_port=19999, udp_port=udp_port)
+        thread = threading.Thread(target=beacon.run, args=(stop,), daemon=True)
+        thread.start()
         try:
-            sys.argv = ["watchdogs", "pair", "--ssh", "me@host"]
-            self.assertEqual(_normalize_argv(None), ["--listen", "--pair", "--ssh", "me@host"])
-            sys.argv = ["watchdogs", "agent", "--report", "127.0.0.1:8765"]
-            self.assertEqual(_normalize_argv(None), ["--headless", "--report", "127.0.0.1:8765"])
+            time.sleep(0.2)
+            found = find_peer("k7m2", timeout=2.5, udp_port=udp_port)
+            self.assertIsNotNone(found)
+            assert found is not None
+            self.assertEqual(found.port, 19999)
+            self.assertEqual(found.code, "K7M2")
         finally:
-            sys.argv = old
+            stop.set()
+            beacon.close()
+            thread.join(timeout=2)
 
-    def test_persist_token(self) -> None:
-        dest = Path(tempfile.mkdtemp(prefix="watchdogs-pair-")) / "config.yaml"
-        cfg = load_config()
-        cfg["_config_path"] = str(dest)
-        persist_pair(cfg, "abc123", "0.0.0.0:8765")
-        loaded = load_config(dest)
-        self.assertEqual(loaded["report"]["token"], "abc123")
+    def test_dashboard_join_from_tui_methods(self) -> None:
+        import time
+
+        dash_cfg = load_config()
+        dash_dir = tempfile.mkdtemp(prefix="watchdogs-link-dash-")
+        dash_cfg["data_dir"] = dash_dir
+        dash_cfg["_config_path"] = str(Path(dash_dir) / "config.yaml")
+        dash_cfg["link"]["port"] = 18765
+        dash_cfg["link"]["discover_port"] = 18766
+        dash = Engine(dash_cfg, demo=True)
+        dash.start()
+        try:
+            message = dash.start_dashboard("AB3K")
+            self.assertIn("AB3K", message)
+            self.assertEqual(dash.link_role, "dashboard")
+            port = dash.report_server.actual_port
+            assert port is not None
+
+            agent_cfg = load_config()
+            agent_dir = tempfile.mkdtemp(prefix="watchdogs-link-agent-")
+            agent_cfg["data_dir"] = agent_dir
+            agent_cfg["_config_path"] = str(Path(agent_dir) / "config.yaml")
+            agent = Engine(agent_cfg, demo=True)
+            agent.start()
+            try:
+                joined = agent.join_dashboard("ab3k", host=f"127.0.0.1:{port}")
+                self.assertIn("127.0.0.1", joined)
+                time.sleep(1.0)
+                self.assertEqual(dash.link_status, "up")
+                self.assertEqual(agent.link_role, "agent")
+                loaded = load_config(Path(agent_dir) / "config.yaml")
+                self.assertEqual(loaded["link"]["role"], "agent")
+                self.assertEqual(loaded["link"]["join_code"], "AB3K")
+            finally:
+                agent.stop()
+        finally:
+            dash.stop()
 
 
 class SettingsTests(unittest.TestCase):
@@ -519,8 +558,6 @@ class SettingsTests(unittest.TestCase):
         values["failed_login_threshold"] = 2
         values["failed_login_window_sec"] = 60
         values["always_alert_root_login"] = False
-        values["server"] = ""
-        values["token"] = "dashboard-token"
         try:
             message = engine.apply_settings(values)
             self.assertEqual(engine.rules.failed_threshold, 2)
@@ -528,7 +565,6 @@ class SettingsTests(unittest.TestCase):
             self.assertIn("saved", message)
             loaded = load_config(dest)
             self.assertEqual(loaded["alerts"]["failed_login_threshold"], 2)
-            self.assertEqual(loaded["report"]["token"], "dashboard-token")
         finally:
             engine.store.close()
 
@@ -538,10 +574,6 @@ class SettingsTests(unittest.TestCase):
         apply_form_values(
             cfg,
             {
-                "server": "10.0.0.2:9000",
-                "bind": "0.0.0.0:8765",
-                "token": "abc",
-                "reconnect_sec": 4,
                 "failed_login_threshold": 8,
                 "failed_login_window_sec": 120,
                 "always_alert_root_login": True,
@@ -554,7 +586,6 @@ class SettingsTests(unittest.TestCase):
         path = Path(tempfile.mkdtemp(prefix="watchdogs-save-")) / "config.yaml"
         save_config(cfg, path)
         loaded = load_config(path)
-        self.assertEqual(loaded["report"]["server"], "10.0.0.2:9000")
         self.assertFalse(loaded["alerts"]["new_source_ip"])
         self.assertEqual(loaded["alerts"]["off_hours"]["start"], 22)
 
@@ -568,7 +599,7 @@ class TuiSmokeTests(unittest.IsolatedAsyncioTestCase):
         cfg["_config_path"] = str(Path(cfg["data_dir"]) / "config.yaml")
         engine = Engine(cfg, demo=True)
         engine.start()
-        app = WatchDogsApp(engine)
+        app = WatchDogsApp(engine, prompt_connect=False)
         try:
             async with app.run_test() as pilot:
                 await pilot.pause(0.8)
@@ -610,6 +641,12 @@ class TuiSmokeTests(unittest.IsolatedAsyncioTestCase):
                 await pilot.click("#save")
                 await pilot.pause()
                 self.assertEqual(engine.rules.failed_threshold, 9)
+                app.action_open_connect()
+                await pilot.pause()
+                self.assertTrue(app.screen.query("#connect-title"))
+                app.screen.action_skip()
+                await pilot.pause()
+                self.assertEqual(engine.link_role, "local")
         finally:
             engine.stop()
 

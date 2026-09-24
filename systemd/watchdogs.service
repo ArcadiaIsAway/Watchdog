@@ -5,13 +5,9 @@ After=network.target systemd-journald.service
 [Service]
 Type=simple
 # Install the package first: pip install /path/to/WatchDogs
-# and copy config.yaml to /etc/watchdogs/config.yaml
-# Local log only:
+# Connect once from the dashboard (`sudo python -m watchdogs`, then Join
+# or Open dashboard). Headless reuses that saved link.
 # ExecStart=/usr/bin/watchdogs --headless -c /etc/watchdogs/config.yaml
-# Prefer: on your PC run `python -m watchdogs pair` (or `pair --ssh user@this-server`)
-# then paste the printed command, or:
-# pair.env can set WATCHDOGS_TOKEN and WATCHDOGS_REPORT
-EnvironmentFile=-/etc/watchdogs/pair.env
 ExecStart=/usr/bin/watchdogs --headless -c /etc/watchdogs/config.yaml
 Restart=on-failure
 RestartSec=3

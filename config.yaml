@@ -17,10 +17,16 @@ alerts:
   off_hours:
     start: 0
     end: 6
+link:
+  role: null
+  join_code: null
+  host: null
+  port: 8765
+  discover_port: 8766
 report:
   server: null
   bind: 0.0.0.0:8765
-  token: nxfxFPSEkg2_kIB-dKTSro6n5D_PtW6u
+  token: null
   reconnect_sec: 3.0
 suspicious_commands:
 - pattern: /dev/tcp/
