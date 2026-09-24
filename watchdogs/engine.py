@@ -148,7 +148,7 @@ class Engine:
 
     def join_dashboard(self, join_code: str, host: str = "") -> str:
         from watchdogs.config import save_config
-        from watchdogs.discover import find_peer, normalize_join_code
+        from watchdogs.discover import locate_dashboard, normalize_join_code, tcp_reachable
         from watchdogs.protocol import parse_endpoint
         from watchdogs.report import ReportClient
 
@@ -161,13 +161,26 @@ class Engine:
                 peer_host, peer_port = parse_endpoint(target)
             else:
                 peer_host, peer_port = target, int((self.cfg.get("link") or {}).get("port") or 8765)
+            if not tcp_reachable(peer_host, peer_port, timeout=2.0):
+                raise ValueError(
+                    f"Nothing is listening at {peer_host}:{peer_port}. "
+                    "On the other computer tap My computer, then use a LAN address, "
+                    "or a 100.x address if BOTH machines are on Tailscale."
+                )
         else:
-            udp_port = int((self.cfg.get("link") or {}).get("discover_port") or 8766)
-            peer = find_peer(code, timeout=5.0, udp_port=udp_port)
+            link = self.cfg.get("link") or {}
+            peer = locate_dashboard(
+                code,
+                timeout=8.0,
+                udp_port=int(link.get("discover_port") or 8766),
+                tcp_port=int(link.get("port") or 8765),
+            )
             if peer is None:
                 raise ValueError(
-                    "No dashboard with that code on this network. "
-                    "Open the dashboard on the other machine first, or type its address."
+                    f"Could not find a dashboard with code {code}. "
+                    "Same network: leave Connect open on the other computer and retry. "
+                    "Different networks: Tailscale must be running on both machines; "
+                    "then type the 100.x address from the other screen."
                 )
             peer_host, peer_port = peer.host, peer.port
         self._stop_link()

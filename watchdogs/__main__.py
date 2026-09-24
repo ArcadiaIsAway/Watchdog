@@ -30,9 +30,9 @@ def _use_project_venv() -> None:
             os.execv(str(candidate), [str(candidate), "-m", "watchdogs", *sys.argv[1:]])
     raise SystemExit(
         "WatchDogs needs Textual. From this folder run:\n"
-        "  python -m venv .venv\n"
+        "  python3 -m venv .venv\n"
         "  .venv/bin/pip install -e .\n"
-        "  .venv/bin/python -m watchdogs"
+        "  sudo .venv/bin/python -m watchdogs"
     )
 
 

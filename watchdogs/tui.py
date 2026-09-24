@@ -104,7 +104,10 @@ class WatchDogsApp(App[None]):
             self.call_after_refresh(self.action_open_connect)
 
     def _on_engine_event(self, kind: str, payload: object) -> None:
-        self.call_from_thread(self._apply, kind, payload)
+        try:
+            self.call_from_thread(self._apply, kind, payload)
+        except RuntimeError:
+            self._apply(kind, payload)
 
     def _apply(self, kind: str, payload: object) -> None:
         if kind == "login" and isinstance(payload, LoginEvent):
@@ -162,7 +165,7 @@ class WatchDogsApp(App[None]):
             remote = self.engine.remote_host or "waiting"
             code = self.engine.join_code or "----"
             identity = f"JOIN {code}     remote={remote}     LINK {link}"
-            note = "Other machine: same app → Join dashboard → type this code  ·  press j to reconnect"
+            note = "On the server: sudo .venv/bin/python -m watchdogs → This is the server  ·  press j"
         elif self.engine.link_role == "agent":
             identity = f"{_host()}     {priv}     JOIN {self.engine.join_code or '----'}"
             note = "Sending logins and commands to the dashboard  ·  press j to change connection"

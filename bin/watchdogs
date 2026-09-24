@@ -1,0 +1,15 @@
+#!/bin/sh
+# Works under sudo: Ubuntu/Debian have python3, not python.
+set -eu
+ROOT=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
+if [ -x "$ROOT/.venv/bin/python" ]; then
+  exec "$ROOT/.venv/bin/python" -m watchdogs "$@"
+fi
+if command -v python3 >/dev/null 2>&1; then
+  exec python3 -m watchdogs "$@"
+fi
+if command -v python >/dev/null 2>&1; then
+  exec python -m watchdogs "$@"
+fi
+echo "python3 is not installed. On Debian/Ubuntu: sudo apt install python3 python3-venv python3-pip" >&2
+exit 1

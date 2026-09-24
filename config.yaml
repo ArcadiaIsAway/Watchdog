@@ -6,28 +6,28 @@ watch:
   journal: true
   process_events: true
   session_poll_sec: 2.0
-  interactive_only: true
+  interactive_only: false
   typed_commands: true
 alerts:
   failed_login_threshold: 5
   failed_login_window_sec: 300
-  always_alert_root_login: true
-  new_source_ip: true
-  alert_sudo_shell: true
+  always_alert_root_login: false
+  new_source_ip: false
+  alert_sudo_shell: false
   off_hours:
     start: 0
     end: 6
-link:
-  role: null
-  join_code: null
-  host: null
-  port: 8765
-  discover_port: 8766
 report:
   server: null
   bind: 0.0.0.0:8765
-  token: null
+  token: SU6P
   reconnect_sec: 3.0
+link:
+  role: dashboard
+  join_code: SU6P
+  host: null
+  port: 8765
+  discover_port: 8766
 suspicious_commands:
 - pattern: /dev/tcp/
   severity: critical

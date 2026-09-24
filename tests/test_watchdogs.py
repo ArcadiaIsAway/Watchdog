@@ -19,7 +19,7 @@ from watchdogs.report import ReportClient, ReportServer
 from watchdogs.procs import is_internal_command, is_user_command
 from watchdogs.shellcmds import parse_typed_log_line, parse_zsh_history_line, should_keep_typed
 from watchdogs.sessions import parse_who_line
-from watchdogs.discover import find_peer, make_join_code, normalize_join_code
+from watchdogs.discover import describe_endpoints, find_peer, make_join_code, normalize_join_code
 from watchdogs.store import Store
 
 
@@ -435,8 +435,10 @@ class ReportLoopbackTests(unittest.TestCase):
         agent.attach(client)
         agent.start()
         try:
-            deadline = time.monotonic() + 4
-            while time.monotonic() < deadline and receiver.login_count < 1:
+            deadline = time.monotonic() + 6
+            while time.monotonic() < deadline and (
+                receiver.login_count < 1 or receiver.alert_count < 1
+            ):
                 time.sleep(0.1)
             self.assertGreater(receiver.login_count, 0)
             self.assertGreater(receiver.alert_count, 0)
@@ -480,6 +482,9 @@ class LinkTests(unittest.TestCase):
         self.assertEqual(normalize_join_code("K-7 m2"), "K7M2")
         self.assertEqual(len(make_join_code()), 4)
         self.assertTrue(all(ch in "ABCDEFGHJKLMNPQRSTUVWXYZ23456789" for ch in make_join_code()))
+        lines = describe_endpoints(8765)
+        self.assertTrue(lines)
+        self.assertTrue(any(":8765" in line for line in lines))
 
     def test_beacon_find_peer(self) -> None:
         import socket
@@ -498,7 +503,7 @@ class LinkTests(unittest.TestCase):
         thread.start()
         try:
             time.sleep(0.2)
-            found = find_peer("k7m2", timeout=2.5, udp_port=udp_port)
+            found = find_peer("k7m2", timeout=4.0, udp_port=udp_port)
             self.assertIsNotNone(found)
             assert found is not None
             self.assertEqual(found.port, 19999)

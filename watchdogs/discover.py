@@ -1,16 +1,20 @@
-"""LAN join-code beacons so two dashboards can find each other without IPs."""
+"""Find a dashboard: LAN beacons, interface broadcasts, Tailscale, TCP check."""
 
 from __future__ import annotations
 
 import json
 import secrets
 import socket
+import struct
+import subprocess
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 APP = "watchdogs"
 CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 DEFAULT_UDP_PORT = 8766
+DEFAULT_TCP_PORT = 8765
+MCAST_GROUP = "239.255.87.65"
 
 
 def make_join_code(length: int = 4) -> str:
@@ -22,8 +26,48 @@ def normalize_join_code(value: str) -> str:
     return "".join(ch for ch in cleaned if ch in CODE_ALPHABET)
 
 
+def _uniq(items: list[str]) -> list[str]:
+    out: list[str] = []
+    for item in items:
+        if item and item not in out:
+            out.append(item)
+    return out
+
+
+def _ip_cmd_addrs() -> tuple[list[str], list[str]]:
+    ips: list[str] = []
+    broadcasts: list[str] = []
+    try:
+        raw = subprocess.run(
+            ["ip", "-4", "-json", "addr"],
+            capture_output=True,
+            text=True,
+            timeout=0.4,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ips, broadcasts
+    if raw.returncode != 0 or not raw.stdout.strip():
+        return ips, broadcasts
+    try:
+        payload = json.loads(raw.stdout)
+    except json.JSONDecodeError:
+        return ips, broadcasts
+    if not isinstance(payload, list):
+        return ips, broadcasts
+    for iface in payload:
+        for info in iface.get("addr_info") or []:
+            local = str(info.get("local") or "")
+            if local and not local.startswith("127."):
+                ips.append(local)
+            brd = str(info.get("broadcast") or "")
+            if brd:
+                broadcasts.append(brd)
+    return ips, broadcasts
+
+
 def local_addresses() -> list[str]:
-    found: list[str] = []
+    found, _ = _ip_cmd_addrs()
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.connect(("1.1.1.1", 80))
@@ -38,12 +82,55 @@ def local_addresses() -> list[str]:
                 found.append(ip)
     except OSError:
         pass
-    unique: list[str] = []
-    for ip in found:
-        if ip not in unique and not ip.startswith("127."):
-            unique.append(ip)
+    unique = [ip for ip in _uniq(found) if not ip.startswith("127.")]
     unique.sort(key=lambda ip: (not ip.startswith("100."), ip))
     return unique
+
+
+def broadcast_targets() -> list[str]:
+    _, broadcasts = _ip_cmd_addrs()
+    return _uniq(["255.255.255.255", "127.0.0.1", *broadcasts, MCAST_GROUP])
+
+
+def describe_endpoints(port: int) -> list[str]:
+    lines: list[str] = []
+    for ip in local_addresses():
+        kind = "Tailscale" if ip.startswith("100.") else "LAN"
+        mark = "  ← only works if the server is on Tailscale too" if kind == "Tailscale" else ""
+        lines.append(f"{kind:<10}  {ip}:{port}{mark}")
+    if not lines:
+        lines.append(f"unknown    0.0.0.0:{port}")
+    return lines
+
+
+def tailscale_peers() -> list[str]:
+    try:
+        raw = subprocess.run(
+            ["tailscale", "status", "--json"],
+            capture_output=True,
+            text=True,
+            timeout=0.4,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    if raw.returncode != 0 or not raw.stdout.strip():
+        return []
+    try:
+        data = json.loads(raw.stdout)
+    except json.JSONDecodeError:
+        return []
+    ips: list[str] = []
+    for peer in (data.get("Peer") or {}).values():
+        if not isinstance(peer, dict):
+            continue
+        if peer.get("Online") is False:
+            continue
+        for ip in peer.get("TailscaleIPs") or []:
+            text = str(ip)
+            if text and ":" not in text:
+                ips.append(text)
+    return _uniq(ips)
 
 
 def parse_beacon(data: bytes) -> dict | None:
@@ -56,7 +143,7 @@ def parse_beacon(data: bytes) -> dict | None:
     return message
 
 
-def encode_beacon(code: str, tcp_port: int, name: str) -> bytes:
+def encode_beacon(code: str, tcp_port: int, name: str, ips: list[str] | None = None) -> bytes:
     return json.dumps(
         {
             "v": 1,
@@ -64,24 +151,128 @@ def encode_beacon(code: str, tcp_port: int, name: str) -> bytes:
             "code": normalize_join_code(code),
             "port": int(tcp_port),
             "name": name,
+            "ips": ips if ips is not None else local_addresses(),
         },
         separators=(",", ":"),
     ).encode("utf-8")
 
 
-def encode_probe(code: str) -> bytes:
+def encode_probe(code: str = "") -> bytes:
     return json.dumps(
         {"v": 1, "app": APP, "want": normalize_join_code(code)},
         separators=(",", ":"),
     ).encode("utf-8")
 
 
-@dataclass(frozen=True)
+def tcp_reachable(host: str, port: int, timeout: float = 0.8) -> bool:
+    try:
+        with socket.create_connection((host, int(port)), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def token_accepted(host: str, port: int, code: str, timeout: float = 1.2) -> bool:
+    """Ask a dashboard if this join code is right, without staying connected."""
+    from watchdogs.protocol import PROTOCOL_NAME, dumps, loads
+
+    sock = None
+    try:
+        sock = socket.create_connection((host, int(port)), timeout=timeout)
+        sock.settimeout(timeout)
+        sock.sendall(dumps({"type": "probe", "protocol": PROTOCOL_NAME, "token": code}))
+        buf = b""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline and b"\n" not in buf:
+            chunk = sock.recv(1024)
+            if not chunk:
+                break
+            buf += chunk
+        if b"\n" not in buf:
+            return False
+        line, _ = buf.split(b"\n", 1)
+        return loads(line).get("type") == "ok"
+    except OSError:
+        return False
+    finally:
+        if sock is not None:
+            try:
+                sock.close()
+            except OSError:
+                pass
+
+
+def prefer_hosts(hosts: list[str]) -> list[str]:
+    ranked = _uniq(hosts)
+    ranked.sort(key=lambda ip: (not str(ip).startswith("100."), str(ip).startswith("127."), ip))
+    return ranked
+
+
+@dataclass
 class Peer:
     host: str
     port: int
     code: str
     name: str
+    ips: tuple[str, ...] = field(default_factory=tuple)
+
+    def candidates(self) -> list[str]:
+        return prefer_hosts([*self.ips, self.host])
+
+    def label(self) -> str:
+        dest = self.candidates()[0] if self.candidates() else self.host
+        return f"{self.name or dest}   {self.code}   {dest}:{self.port}"
+
+
+def _peer_from_message(message: dict, src_host: str) -> Peer | None:
+    code = normalize_join_code(str(message.get("code") or ""))
+    port = message.get("port")
+    if not code or not port:
+        return None
+    ips = [str(ip) for ip in (message.get("ips") or []) if ip]
+    return Peer(
+        host=src_host,
+        port=int(port),
+        code=code,
+        name=str(message.get("name") or src_host),
+        ips=tuple(_uniq(ips)),
+    )
+
+
+def _open_udp(port: int) -> socket.socket:
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+    except (AttributeError, OSError):
+        pass
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+    sock.bind(("", int(port)))
+    try:
+        mreq = struct.pack("=4sl", socket.inet_aton(MCAST_GROUP), socket.INADDR_ANY)
+        sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
+    except OSError:
+        pass
+    sock.settimeout(0.35)
+    return sock
+
+
+_HOSTS_AT = time.monotonic()
+_HOSTS: list[str] = ["255.255.255.255", "127.0.0.1", MCAST_GROUP]
+
+
+def _discovery_hosts() -> list[str]:
+    global _HOSTS_AT, _HOSTS
+    now = time.monotonic()
+    if now - _HOSTS_AT < 8.0:
+        return _HOSTS
+    _HOSTS_AT = now
+    _HOSTS = _uniq([*_HOSTS, *broadcast_targets(), *tailscale_peers()])
+    return _HOSTS
+
+
+def _probe_dests(udp_port: int) -> list[tuple[str, int]]:
+    return [(host, udp_port) for host in _discovery_hosts()]
 
 
 class Beacon:
@@ -114,20 +305,15 @@ class Beacon:
             pass
 
     def run(self, stop) -> None:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-        sock.bind(("", self.udp_port))
-        sock.settimeout(0.4)
+        sock = _open_udp(self.udp_port)
         self._sock = sock
-        payload = self.payload()
-        dests = [("255.255.255.255", self.udp_port), ("127.0.0.1", self.udp_port)]
         last_send = 0.0
         try:
             while not stop.is_set():
+                payload = self.payload()
                 now = time.monotonic()
-                if now - last_send >= 1.0:
-                    for dest in dests:
+                if now - last_send >= 0.8:
+                    for dest in _probe_dests(self.udp_port):
                         try:
                             sock.sendto(payload, dest)
                         except OSError:
@@ -140,33 +326,39 @@ class Beacon:
                 except OSError:
                     break
                 message = parse_beacon(data)
-                if message and message.get("want") == self.code:
-                    try:
-                        sock.sendto(payload, addr)
-                    except OSError:
-                        pass
+                if not message or "want" not in message:
+                    continue
+                want = normalize_join_code(str(message.get("want") or ""))
+                if want and want != self.code:
+                    continue
+                try:
+                    sock.sendto(payload, addr)
+                except OSError:
+                    pass
         finally:
             self.close()
 
 
-def find_peer(code: str, timeout: float = 5.0, udp_port: int = DEFAULT_UDP_PORT) -> Peer | None:
-    """Ask the LAN for a dashboard advertising this join code."""
-    code = normalize_join_code(code)
-    if not code:
-        return None
+def collect_peers(timeout: float = 2.0, udp_port: int = DEFAULT_UDP_PORT, want: str = "") -> list[Peer]:
+    """Listen for dashboard beacons and ask the LAN/Tailscale who is there."""
+    want = normalize_join_code(want)
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-    sock.settimeout(0.4)
-    probe = encode_probe(code)
-    dests = [("255.255.255.255", udp_port), ("127.0.0.1", udp_port)]
+    sock.settimeout(0.3)
+    found: dict[tuple[str, int, str], Peer] = {}
     deadline = time.monotonic() + max(0.4, timeout)
+    last_probe = 0.0
     try:
         while time.monotonic() < deadline:
-            for dest in dests:
-                try:
-                    sock.sendto(probe, dest)
-                except OSError:
-                    pass
+            now = time.monotonic()
+            if now - last_probe >= 0.6:
+                probe = encode_probe(want)
+                for dest in _probe_dests(udp_port):
+                    try:
+                        sock.sendto(probe, dest)
+                    except OSError:
+                        pass
+                last_probe = now
             try:
                 data, addr = sock.recvfrom(2048)
             except TimeoutError:
@@ -176,15 +368,41 @@ def find_peer(code: str, timeout: float = 5.0, udp_port: int = DEFAULT_UDP_PORT)
             message = parse_beacon(data)
             if not message:
                 continue
-            found = normalize_join_code(str(message.get("code") or ""))
-            port = message.get("port")
-            if found == code and port:
-                return Peer(
-                    host=addr[0],
-                    port=int(port),
-                    code=found,
-                    name=str(message.get("name") or addr[0]),
-                )
+            peer = _peer_from_message(message, addr[0])
+            if peer is None:
+                continue
+            if want and peer.code != want:
+                continue
+            found[(peer.code, peer.port, peer.name)] = peer
     finally:
         sock.close()
+    return list(found.values())
+
+
+def find_peer(code: str, timeout: float = 5.0, udp_port: int = DEFAULT_UDP_PORT) -> Peer | None:
+    code = normalize_join_code(code)
+    if not code:
+        return None
+    peers = collect_peers(timeout=timeout, udp_port=udp_port, want=code)
+    return peers[0] if peers else None
+
+
+def locate_dashboard(
+    code: str,
+    timeout: float = 8.0,
+    udp_port: int = DEFAULT_UDP_PORT,
+    tcp_port: int = DEFAULT_TCP_PORT,
+) -> Peer | None:
+    """Find a reachable dashboard for this join code (LAN, then Tailscale)."""
+    code = normalize_join_code(code)
+    if not code:
+        return None
+    peers = collect_peers(timeout=timeout, udp_port=udp_port, want=code)
+    for peer in peers:
+        for host in peer.candidates():
+            if tcp_reachable(host, peer.port):
+                return Peer(host=host, port=peer.port, code=peer.code, name=peer.name, ips=peer.ips)
+    for host in tailscale_peers():
+        if token_accepted(host, tcp_port, code):
+            return Peer(host=host, port=tcp_port, code=code, name=host, ips=(host,))
     return None

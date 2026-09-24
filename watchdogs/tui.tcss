@@ -104,9 +104,10 @@ ConnectScreen {
 }
 
 #connect-box {
-    width: 78;
+    width: 86;
     max-width: 100%;
     height: auto;
+    max-height: 94%;
     background: #071018;
     border: solid #00e5ff;
     padding: 1 2;
@@ -117,17 +118,29 @@ ConnectScreen {
     text-style: bold;
 }
 
-#connect-lead {
+#connect-lead, #pick-lead, #dash-steps, #server-steps {
     color: #7aa8b3;
-    margin: 1 0;
+    margin: 0 0 1 0;
+    height: auto;
 }
 
 #connect-code {
     color: #00e5ff;
     text-style: bold;
     text-align: center;
+    margin: 1 0;
+    height: auto;
+}
+
+#dash-addrs {
+    color: #c8d0d8;
     margin: 0 0 1 0;
     height: auto;
+}
+
+#dash-wait {
+    color: #00e5ff;
+    margin-bottom: 1;
 }
 
 #connect-addrs {
@@ -141,13 +154,29 @@ ConnectScreen {
     margin-top: 1;
 }
 
-#connect-actions, #connect-after {
+#view-pick, #view-dashboard, #view-server {
+    height: auto;
+}
+
+#view-pick Button {
+    width: 100%;
+    margin: 0 0 1 0;
+}
+
+#nearby {
+    height: 7;
+    background: #0a0e14;
+    border: solid #1c3a4a;
+    margin: 0 0 1 0;
+}
+
+#connect-after, #server-actions {
     height: 3;
     align: left middle;
     margin-top: 1;
 }
 
-#connect-actions Button, #connect-after Button {
+#connect-after Button, #server-actions Button {
     margin-right: 1;
 }
 

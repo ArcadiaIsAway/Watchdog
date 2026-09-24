@@ -298,6 +298,13 @@ class ReportServer:
             if hello_line is None:
                 return
             hello = loads(hello_line)
+            if hello.get("type") == "probe" and hello.get("protocol") == PROTOCOL_NAME:
+                offered = str(hello.get("token") or "")
+                if tokens_match(offered, self.token):
+                    conn.sendall(dumps({"type": "ok", "kind": "probe"}))
+                else:
+                    conn.sendall(dumps({"type": "error", "reason": "bad token"}))
+                return
             if hello.get("type") != "hello" or hello.get("protocol") != PROTOCOL_NAME:
                 conn.sendall(dumps({"type": "error", "reason": "bad handshake"}))
                 return
