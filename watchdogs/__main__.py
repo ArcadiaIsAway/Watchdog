@@ -147,11 +147,26 @@ def _run_headless(engine: Engine, seconds: float) -> int:
 def _run_tui(engine: Engine) -> int:
     from watchdogs.tui import WatchDogsApp
 
+    def _on_hup(_signum, _frame) -> None:
+        raise SystemExit(0)
+
+    if hasattr(signal, "SIGHUP"):
+        signal.signal(signal.SIGHUP, _on_hup)
+
     engine.start()
     try:
         WatchDogsApp(engine).run()
     finally:
+        role = engine.link_role
+        config_path = engine.cfg.get("_config_path")
+        data = engine.store.directory
         engine.stop()
+        if role == "agent" and not engine.demo:
+            from watchdogs.service import ensure_background_agent
+
+            note = ensure_background_agent(config_path, data)
+            if note:
+                print(f"WatchDogs staying up: {note}", flush=True)
     return 0
 
 

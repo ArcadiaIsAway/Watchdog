@@ -225,11 +225,21 @@ class SelfFilterTests(unittest.TestCase):
         self.assertEqual(event.cmdline, "gti status")
         self.assertEqual(event.source, "shell")
         self.assertTrue(is_user_command(event, interactive_only=True))
-        hook = _bash_hook(Path("/tmp/typed-commands.log"))
+        hook = _bash_hook()
         self.assertNotIn("awk", hook)
         self.assertNotIn('\\"', hook)
+        self.assertNotIn("/var/lib/watchdogs/typed-commands.log", hook)
         self.assertIn("history 1", hook)
-        self.assertIn("/tmp/typed-commands.log", hook)
+        self.assertIn("_watchdogs_alive", hook)
+        self.assertIn("_watchdogs_disable", hook)
+        self.assertIn("2>/dev/null", hook)
+        from watchdogs.shellcmds import _BASH_HOOK_OFF, disable_typed_hooks, enable_typed_hooks
+
+        dest = Path(tempfile.mkdtemp(prefix="watchdogs-hooks-"))
+        enable_typed_hooks(dest, source_rc=False)
+        disable_typed_hooks(dest)
+        self.assertEqual((dest / "hooks" / "watchdogs.bash").read_text(), _BASH_HOOK_OFF)
+        self.assertFalse((dest / "typed.enabled").exists())
 
     def test_keeps_real_user_commands(self) -> None:
         event = CommandEvent(

@@ -271,6 +271,10 @@ class Engine:
         for thread in self._threads:
             thread.join(timeout=2.5)
         self._threads.clear()
+        if not self.receiver and not self.demo:
+            from watchdogs.shellcmds import disable_typed_hooks
+
+            disable_typed_hooks(self.store.directory)
         self.store.close()
 
     def _collectors(self) -> list[Any]:

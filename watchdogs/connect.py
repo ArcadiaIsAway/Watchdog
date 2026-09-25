@@ -306,7 +306,7 @@ class ConnectScreen(ModalScreen[str | None]):
             except Exception as exc:
                 self.app.call_from_thread(self._join_failed, str(exc))
                 return
-            self.app.call_from_thread(self.dismiss, message)
+            self.app.call_from_thread(self.dismiss, "__background__")
 
         threading.Thread(target=work, name="watchdogs-join", daemon=True).start()
 

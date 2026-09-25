@@ -19,6 +19,8 @@ EmitFn = Callable[[str, object], None]
 _ZSH_LINE = re.compile(r"^: (\d+):\d+;(.*)$")
 _HOOK_MARK = "watchdogs-typed-commands"
 _SKIP_PREFIXES = ("watchdogs", "source ", ".", "history ", "fc ")
+_SENTINEL_NAME = "typed.enabled"
+_SENTINEL_MAX_AGE = 90
 
 
 def parse_zsh_history_line(line: str) -> tuple[datetime | None, str]:
@@ -105,51 +107,242 @@ def _homes() -> list[tuple[str, Path]]:
 
 
 _BASH_HOOK = r"""# watchdogs-typed-commands
+_watchdogs_alive() {
+  local flag age now
+  now=$(date +%s 2>/dev/null) || return 1
+  for flag in /run/watchdogs/typed.enabled /var/lib/watchdogs/typed.enabled \
+    "${XDG_DATA_HOME:-$HOME/.local/share}/watchdogs/typed.enabled"; do
+    [ -f "$flag" ] || continue
+    age=$(( now - $(stat -c %Y "$flag" 2>/dev/null || echo 0) ))
+    [ "$age" -ge 0 ] && [ "$age" -lt 90 ] && return 0
+  done
+  return 1
+}
+_watchdogs_disable() {
+  case ";${PROMPT_COMMAND:-};" in
+    *"_watchdogs_typed"*)
+      PROMPT_COMMAND="${PROMPT_COMMAND//_watchdogs_typed;/}"
+      PROMPT_COMMAND="${PROMPT_COMMAND//;_watchdogs_typed/}"
+      PROMPT_COMMAND="${PROMPT_COMMAND//_watchdogs_typed/}"
+      ;;
+  esac
+  unset -f _watchdogs_typed 2>/dev/null
+  unset -f _watchdogs_alive 2>/dev/null
+  unset -f _watchdogs_disable 2>/dev/null
+}
 _watchdogs_typed() {
-  local raw cmd
+  local raw cmd logdir log
+  if ! _watchdogs_alive; then
+    _watchdogs_disable
+    return 0
+  fi
+  logdir="${XDG_DATA_HOME:-$HOME/.local/share}/watchdogs"
+  log="$logdir/typed-commands.log"
+  mkdir -p "$logdir" 2>/dev/null || return 0
   raw=$(HISTTIMEFORMAT= builtin history 1 2>/dev/null) || return 0
   read -r _ cmd <<< "$raw"
   [ -n "$cmd" ] || return 0
-  printf '%s|%s|%s|%s\n' "$(date -Iseconds 2>/dev/null || date)" "${USER:-unknown}" "${TTY#/dev/}" "$cmd" >> "__LOG__"
+  printf '%s|%s|%s|%s\n' "$(date -Iseconds 2>/dev/null || date)" "${USER:-unknown}" "${TTY#/dev/}" "$cmd" >> "$log" 2>/dev/null || return 0
   builtin history -a 2>/dev/null || true
 }
-case ";${PROMPT_COMMAND:-};" in
-  *"_watchdogs_typed"*) ;;
-  *) PROMPT_COMMAND="_watchdogs_typed${PROMPT_COMMAND:+;$PROMPT_COMMAND}" ;;
-esac
-"""
-
-_ZSH_HOOK = r"""# watchdogs-typed-commands
-_watchdogs_typed() {
-  print -r -- "$(date -Iseconds 2>/dev/null || date)|${USER:-unknown}|${TTY#/dev/}|$1" >> "__LOG__"
-}
-typeset -ga preexec_functions
-if [[ " ${preexec_functions[*]} " != *" _watchdogs_typed "* ]]; then
-  preexec_functions+=(_watchdogs_typed)
+if _watchdogs_alive; then
+  case ";${PROMPT_COMMAND:-};" in
+    *"_watchdogs_typed"*) ;;
+    *) PROMPT_COMMAND="_watchdogs_typed${PROMPT_COMMAND:+;$PROMPT_COMMAND}" ;;
+  esac
+else
+  _watchdogs_disable
 fi
 """
 
+_ZSH_HOOK = r"""# watchdogs-typed-commands
+_watchdogs_alive() {
+  local flag age now
+  now=$(date +%s 2>/dev/null) || return 1
+  for flag in /run/watchdogs/typed.enabled /var/lib/watchdogs/typed.enabled \
+    "${XDG_DATA_HOME:-$HOME/.local/share}/watchdogs/typed.enabled"; do
+    [ -f "$flag" ] || continue
+    age=$(( now - $(stat -c %Y "$flag" 2>/dev/null || echo 0) ))
+    [ "$age" -ge 0 ] && [ "$age" -lt 90 ] && return 0
+  done
+  return 1
+}
+_watchdogs_disable() {
+  typeset -ga preexec_functions
+  preexec_functions=(${preexec_functions:#_watchdogs_typed})
+  unfunction _watchdogs_typed 2>/dev/null
+  unfunction _watchdogs_alive 2>/dev/null
+  unfunction _watchdogs_disable 2>/dev/null
+}
+_watchdogs_typed() {
+  local logdir
+  _watchdogs_alive || { _watchdogs_disable; return 0; }
+  logdir="${XDG_DATA_HOME:-$HOME/.local/share}/watchdogs"
+  mkdir -p "$logdir" 2>/dev/null || return 0
+  print -r -- "$(date -Iseconds 2>/dev/null || date)|${USER:-unknown}|${TTY#/dev/}|$1" >> "$logdir/typed-commands.log" 2>/dev/null || return 0
+}
+if _watchdogs_alive; then
+  typeset -ga preexec_functions
+  if [[ " ${preexec_functions[*]} " != *" _watchdogs_typed "* ]]; then
+    preexec_functions+=(_watchdogs_typed)
+  fi
+else
+  _watchdogs_disable
+fi
+"""
 
-def _bash_hook(log_path: Path) -> str:
-    return _BASH_HOOK.replace("__LOG__", str(log_path))
+_BASH_HOOK_OFF = r"""# watchdogs-typed-commands
+_watchdogs_disable() {
+  case ";${PROMPT_COMMAND:-};" in
+    *"_watchdogs_typed"*)
+      PROMPT_COMMAND="${PROMPT_COMMAND//_watchdogs_typed;/}"
+      PROMPT_COMMAND="${PROMPT_COMMAND//;_watchdogs_typed/}"
+      PROMPT_COMMAND="${PROMPT_COMMAND//_watchdogs_typed/}"
+      ;;
+  esac
+  unset -f _watchdogs_typed 2>/dev/null
+  unset -f _watchdogs_alive 2>/dev/null
+  unset -f _watchdogs_disable 2>/dev/null
+}
+_watchdogs_disable
+"""
+
+_ZSH_HOOK_OFF = r"""# watchdogs-typed-commands
+_watchdogs_disable() {
+  typeset -ga preexec_functions
+  preexec_functions=(${preexec_functions:#_watchdogs_typed})
+  unfunction _watchdogs_typed 2>/dev/null
+  unfunction _watchdogs_alive 2>/dev/null
+  unfunction _watchdogs_disable 2>/dev/null
+}
+_watchdogs_disable
+"""
 
 
-def _zsh_hook(log_path: Path) -> str:
-    return _ZSH_HOOK.replace("__LOG__", str(log_path))
+def _bash_hook(log_path: Path | None = None) -> str:
+    _ = log_path
+    return _BASH_HOOK
+
+
+def _zsh_hook(log_path: Path | None = None) -> str:
+    _ = log_path
+    return _ZSH_HOOK
+
+
+def user_typed_log(home: Path) -> Path:
+    return Path(home) / ".local/share/watchdogs" / "typed-commands.log"
+
+
+def typed_log_paths(data_dir: Path) -> list[Path]:
+    paths = [Path(data_dir) / "typed-commands.log"]
+    for _user, home in _homes():
+        paths.append(user_typed_log(home))
+    unique: list[Path] = []
+    for path in paths:
+        if path not in unique:
+            unique.append(path)
+    return unique
+
+
+def _hook_files(hook_dir: Path) -> tuple[Path, Path]:
+    return Path(hook_dir) / "watchdogs.bash", Path(hook_dir) / "watchdogs.zsh"
+
+
+def _write_hooks(hook_dir: Path, bash_text: str, zsh_text: str) -> None:
+    hook_dir = Path(hook_dir)
+    try:
+        hook_dir.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return
+    bash, zsh = _hook_files(hook_dir)
+    try:
+        bash.write_text(bash_text, encoding="utf-8")
+        zsh.write_text(zsh_text, encoding="utf-8")
+        bash.chmod(0o644)
+        zsh.chmod(0o644)
+    except OSError:
+        return
+
+
+def sentinel_paths(data_dir: Path) -> list[Path]:
+    paths = [
+        Path("/run/watchdogs") / _SENTINEL_NAME,
+        Path("/var/lib/watchdogs") / _SENTINEL_NAME,
+        Path(data_dir) / _SENTINEL_NAME,
+    ]
+    unique: list[Path] = []
+    for path in paths:
+        if path not in unique:
+            unique.append(path)
+    return unique
+
+
+def _write_sentinels(data_dir: Path) -> None:
+    payload = f"{os.getpid()}\n"
+    for path in sentinel_paths(data_dir):
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(payload, encoding="utf-8")
+            path.chmod(0o644)
+        except OSError:
+            continue
+
+
+def touch_typed_hooks(data_dir: Path) -> None:
+    for path in sentinel_paths(data_dir):
+        try:
+            if path.is_file():
+                path.touch()
+        except OSError:
+            continue
+
+
+def enable_typed_hooks(
+    data_dir: Path,
+    hook_dir: Path | None = None,
+    *,
+    source_rc: bool = True,
+) -> None:
+    hook_dir = Path(hook_dir or Path(data_dir) / "hooks")
+    _write_hooks(hook_dir, _BASH_HOOK, _ZSH_HOOK)
+    _write_sentinels(data_dir)
+    if not source_rc:
+        return
+    bash, zsh = _hook_files(hook_dir)
+    for _user, home in _homes():
+        _ensure_source(home / ".bashrc", bash)
+        _ensure_source(home / ".zshrc", zsh)
+
+
+def disable_typed_hooks(data_dir: Path, hook_dir: Path | None = None) -> None:
+    """Turn hooks off. Other WatchDogs processes keep their own sentinel."""
+    mine = str(os.getpid())
+    leftover = False
+    for path in sentinel_paths(data_dir):
+        try:
+            owner = path.read_text(encoding="utf-8").strip()
+        except OSError:
+            continue
+        if owner and owner != mine:
+            leftover = True
+            continue
+        try:
+            path.unlink()
+        except OSError:
+            pass
+    if leftover:
+        return
+    hook_dir = Path(hook_dir or Path(data_dir) / "hooks")
+    _write_hooks(hook_dir, _BASH_HOOK_OFF, _ZSH_HOOK_OFF)
 
 
 def install_hooks(log_path: Path, hook_dir: Path) -> None:
-    hook_dir.mkdir(parents=True, exist_ok=True)
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    log_path.touch(exist_ok=True)
-    bash = hook_dir / "watchdogs.bash"
-    zsh = hook_dir / "watchdogs.zsh"
-    bash.write_text(_bash_hook(log_path), encoding="utf-8")
-    zsh.write_text(_zsh_hook(log_path), encoding="utf-8")
-    for user, home in _homes():
-        _ensure_source(home / ".bashrc", bash)
-        _ensure_source(home / ".zshrc", zsh)
-        _ = user
+    try:
+        Path(log_path).parent.mkdir(parents=True, exist_ok=True)
+        Path(log_path).touch(exist_ok=True)
+    except OSError:
+        pass
+    enable_typed_hooks(Path(log_path).parent, hook_dir)
 
 
 def _ensure_source(rc: Path, hook: Path) -> None:
@@ -241,17 +434,36 @@ class ShellCommandCollector:
         else:
             self.log_path.parent.mkdir(parents=True, exist_ok=True)
             self.log_path.touch(exist_ok=True)
-        tails: list[tuple[_FileTail, str, str]] = [(_FileTail(self.log_path), "typed", getpass.getuser())]
-        for user, home in _homes():
-            for path in history_paths_for(home):
-                tails.append((_FileTail(path), path.name, user))
-        while not stop.is_set():
-            for tail, kind, user in tails:
-                for line in tail.read_new_lines():
-                    event = self._line_to_event(line, kind, user)
-                    if event is not None:
-                        self._emit(event)
-            stop.wait(0.35)
+        tails: list[tuple[_FileTail, str, str]] = []
+        seen_paths: set[Path] = set()
+        last_touch = 0.0
+
+        def _watch(path: Path, kind: str, user: str) -> None:
+            if path in seen_paths:
+                return
+            seen_paths.add(path)
+            tails.append((_FileTail(path), kind, user))
+
+        try:
+            while not stop.is_set():
+                now = datetime.now().timestamp()
+                if write_rc and now - last_touch >= 8:
+                    touch_typed_hooks(self.data_dir)
+                    last_touch = now
+                for path in typed_log_paths(self.data_dir):
+                    _watch(path, "typed", getpass.getuser())
+                for user, home in _homes():
+                    for path in history_paths_for(home):
+                        _watch(path, path.name, user)
+                for tail, kind, user in tails:
+                    for line in tail.read_new_lines():
+                        event = self._line_to_event(line, kind, user)
+                        if event is not None:
+                            self._emit(event)
+                stop.wait(0.35)
+        finally:
+            if write_rc:
+                disable_typed_hooks(self.data_dir, self.hook_dir)
 
     def _line_to_event(self, line: str, kind: str, user: str) -> CommandEvent | None:
         if kind == "typed":

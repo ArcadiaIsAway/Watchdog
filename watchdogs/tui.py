@@ -201,6 +201,10 @@ class WatchDogsApp(App[None]):
         from watchdogs.connect import ConnectScreen
 
         def _done(message: str | None) -> None:
+            if message == "__background__":
+                self.notify("Agent will keep running after you disconnect", title="Connect", timeout=6)
+                self.exit()
+                return
             if message:
                 self.notify(message, title="Connect", timeout=8)
             self._refresh_header()
